@@ -15,7 +15,7 @@ export function generateNoiseTexture() {
     for (let i = 0; i < data.length; i += 4) {
         const x = (i / 4) % size;
         const y = Math.floor((i / 4) / size);
-        const n2 = noise(x * 0.8, y * 0.8); // High freq for texture
+        const n2 = noise(x * 0.8, y * 0.8);
         const v = (n2 * 0.5 + 0.5) * 255; 
         data[i] = v;     
         data[i + 1] = v; 

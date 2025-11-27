@@ -14,7 +14,6 @@ const TRAIL_DURATION = 300.0;
 let playerPath = [];
 let lastMapKey = false;
 
-// Reusable vector for minimap rotation
 const _forward = new THREE.Vector3();
 const _zAxis = new THREE.Vector3(0, 0, -1);
 
@@ -35,7 +34,6 @@ export function initUI(controls) {
 
     initLargeMap(controls);
 
-    // --- Event Listeners ---
     instructions.addEventListener('click', () => controls.lock());
 
     controls.addEventListener('lock', () => {
@@ -45,8 +43,6 @@ export function initUI(controls) {
     });
 
     controls.addEventListener('unlock', () => {
-        // Only show instructions if NOT in map mode
-        // We can check style of large map
         const largeMap = document.getElementById('largeMap');
         if (largeMap.style.display === 'none') {
             instructions.style.display = 'block';
@@ -113,11 +109,10 @@ export function initUI(controls) {
         updateDisplay('val-airmax', physicsParams.MAX_AIR_SPEED.toFixed(1));
     });
 
-    // Initialize UI with current values
     speedSlider.value = physicsParams.MOVE_SPEED;
     jumpSlider.value = physicsParams.JUMP_FORCE;
     gravitySlider.value = physicsParams.GRAVITY;
-    sensSlider.value = DEFAULTS.SENSITIVITY; // Controls not yet linked to params directly in same way
+    sensSlider.value = DEFAULTS.SENSITIVITY;
     airMaxSlider.value = physicsParams.MAX_AIR_SPEED;
 
     updateDisplay('val-speed', physicsParams.MOVE_SPEED);
@@ -128,7 +123,6 @@ export function initUI(controls) {
 }
 
 export function updateUI(dt, clock, camera) {
-    // Check for Map Toggle
     if (keys.map && !lastMapKey) {
         toggleLargeMap();
     }

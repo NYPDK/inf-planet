@@ -16,10 +16,11 @@ export function initResources(scene, globalShaderUniforms) {
     const textureLoader = new THREE.TextureLoader();
     const grassTexture = textureLoader.load('textures/tall-grass-texture.png');
     grassTexture.colorSpace = THREE.SRGBColorSpace;
+    const grassDryTexture = textureLoader.load('textures/tall-grass-dry-texture.png');
+    grassDryTexture.colorSpace = THREE.SRGBColorSpace;
 
     const groundBump = generateNoiseTexture();
-    
-    // 1. Define Materials
+
     materials.groundMat = new THREE.MeshStandardMaterial({ 
         vertexColors: true, 
         roughness: 0.6, 
@@ -38,14 +39,23 @@ export function initResources(scene, globalShaderUniforms) {
         roughness: 0.5 
     });
 
-    materials.grassMat = new THREE.MeshBasicMaterial({
+    materials.grassMat = new THREE.MeshStandardMaterial({
         map: grassTexture,
         transparent: true,
         alphaTest: 0.5,
-        side: THREE.DoubleSide
+        side: THREE.DoubleSide,
+        roughness: 0.8,
+        metalness: 0.0
+    });
+    materials.grassDryMat = new THREE.MeshStandardMaterial({
+        map: grassDryTexture,
+        transparent: true,
+        alphaTest: 0.5,
+        side: THREE.DoubleSide,
+        roughness: 0.8,
+        metalness: 0.0
     });
 
-    // 2. Define Geometries
     geometries.trunkGeo = new THREE.CylinderGeometry(0.4, 0.8, 3, 5);
     geometries.trunkGeo.translate(0, 1.5, 0); 
     
@@ -58,16 +68,12 @@ export function initResources(scene, globalShaderUniforms) {
     geometries.grassGeo = BufferGeometryUtils.mergeGeometries([grassPlane1, grassPlane2]);
     geometries.grassGeo.translate(0, 0.6, 0);
 
-    // 3. Shader Injection Logic
-    
-    // Common Vertex Shader Injection for Curvature
     const commonUniforms = `
         uniform float uCurvature;
         uniform vec3 uBendCenter;
     `;
     
     const curvatureLogic = `
-        // Compute bent world position (supports Instancing & Batching)
         vec4 bentWorldPosition = vec4( transformed, 1.0 );
         #ifdef USE_BATCHING
             bentWorldPosition = batchingMatrix * bentWorldPosition;
@@ -77,21 +83,14 @@ export function initResources(scene, globalShaderUniforms) {
         #endif
         bentWorldPosition = modelMatrix * bentWorldPosition;
 
-        // Calculate distance from bend center
         float dist = distance(bentWorldPosition.xz, uBendCenter.xz);
-        
-        // Quadratic bend factor
         float bendFactor = dist * dist * uCurvature;
-        
-        // Apply bend to Y
         bentWorldPosition.y -= bendFactor;
 
-        // Transform to view space, then clip space
         vec4 mvPosition = viewMatrix * bentWorldPosition;
         gl_Position = projectionMatrix * mvPosition;
     `;
 
-    // Applies curvature to Standard/Basic Materials
     function setupMaterial(material) {
         material.onBeforeCompile = (shader) => {
             shader.uniforms.uCurvature = shaderUniforms.uCurvature;
@@ -112,7 +111,6 @@ export function initResources(scene, globalShaderUniforms) {
                 `
             );
 
-            // Fix worldPosition for lighting
             shader.vertexShader = shader.vertexShader.replace(
                 '#include <worldpos_vertex>',
                 `vec4 worldPosition = bentWorldPosition;`
@@ -120,55 +118,12 @@ export function initResources(scene, globalShaderUniforms) {
         };
     }
 
-    // Creates and assigns a custom Depth Material for shadows
-    function setupShadowMaterial(material) {
-        const depthMat = new THREE.MeshDepthMaterial({
-            depthPacking: THREE.RGBADepthPacking,
-            map: material.map || null,
-            alphaTest: material.alphaTest || 0,
-            side: material.side
-        });
-
-        // We must manually inject the curvature into the depth material too
-        depthMat.onBeforeCompile = (shader) => {
-            shader.uniforms.uCurvature = shaderUniforms.uCurvature;
-            shader.uniforms.uBendCenter = shaderUniforms.uBendCenter;
-
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <common>',
-                `${commonUniforms}\n#include <common>`
-            );
-
-            // MeshDepthMaterial uses <project_vertex> but usually no fog/lighting
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <project_vertex>',
-                curvatureLogic 
-            );
-        };
-
-        material.customDepthMaterial = depthMat;
-
-        // Optional: Distance Material (for PointLights) - simpler fallback logic
-        const distMat = new THREE.MeshDistanceMaterial({
-            map: material.map || null,
-            alphaTest: material.alphaTest || 0
-        });
-        distMat.onBeforeCompile = depthMat.onBeforeCompile;
-        material.customDistanceMaterial = distMat;
-    }
-
-    // 4. Apply Shaders
     setupMaterial(materials.groundMat);
     setupMaterial(materials.trunkMat);
     setupMaterial(materials.treeMat);
     setupMaterial(materials.grassMat);
+    setupMaterial(materials.grassDryMat);
 
-    setupShadowMaterial(materials.groundMat);
-    setupShadowMaterial(materials.trunkMat);
-    setupShadowMaterial(materials.treeMat);
-    setupShadowMaterial(materials.grassMat);
-
-    // 5. Water Setup (Custom ShaderMaterial)
     const waterGeo = new THREE.PlaneGeometry(
         CHUNK_SIZE * (RENDER_DISTANCE * 2 + 2), 
         CHUNK_SIZE * (RENDER_DISTANCE * 2 + 2), 
@@ -204,16 +159,13 @@ export function initResources(scene, globalShaderUniforms) {
         void main() {
             vec3 pos = position;
             
-            // Base world position
             vec4 baseWorldPos = modelMatrix * vec4(pos, 1.0);
 
-            // Waves
             float wave1 = sin(baseWorldPos.x * 0.8 + uTime * 1.5) * 0.05;
             float wave2 = cos(baseWorldPos.z * 0.1 + uTime * 1.2) * 0.05;
             float displacement = wave1 + wave2;
             pos.y += displacement;
 
-            // Simple wave normal approximation
             vec3 worldNormal = normalize(vec3(
                 -0.2 * 0.8 * cos(baseWorldPos.x * 0.8 + uTime * 1.5), 
                 1.0, 
@@ -225,7 +177,6 @@ export function initResources(scene, globalShaderUniforms) {
             
             vec4 worldPos = modelMatrix * vec4(pos, 1.0);
 
-            // Curvature
             float dist = distance(baseWorldPos.xz, uBendCenter.xz);
             float bendFactor = dist * dist * uCurvature;
             worldPos.y -= bendFactor;
@@ -270,7 +221,9 @@ export function initResources(scene, globalShaderUniforms) {
         transparent: true,
         side: THREE.DoubleSide,
         fog: true,
-        lights: true
+        lights: true,
+        depthWrite: false,
+        depthTest: true
     });
 
     waterMesh = new THREE.Mesh(waterGeo, waterMat);

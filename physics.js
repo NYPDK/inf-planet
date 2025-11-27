@@ -18,7 +18,6 @@ export let isUnderwater = false;
 let currentHeight = PHYSICS_CONSTANTS.PLAYER_HEIGHT;
 let flyVelocity = new THREE.Vector3();
 
-// Reusable vectors
 const _forward = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _wishDir = new THREE.Vector3();
@@ -29,9 +28,8 @@ export function updatePhysics(dt, camera, controls) {
     if (!controls.isLocked) return;
 
     const wasUnderwater = isUnderwater;
-    isUnderwater = playerPos.y < -5.0; // Water level is -5.0
+    isUnderwater = playerPos.y < -5.0;
 
-    // Fly mode: no gravity/collisions, move in camera space with optional sprint
     if (keys.fly) {
         _forward.copy(_zAxis).applyQuaternion(camera.quaternion);
         _right.copy(_xAxis).applyQuaternion(camera.quaternion);
@@ -51,7 +49,7 @@ export function updatePhysics(dt, camera, controls) {
 
         playerPos.addScaledVector(flyVelocity, dt);
         onGround = false;
-        velocity.set(0, 0, 0); // Reset grounded velocity so we don't accumulate gravity on exit
+        velocity.set(0, 0, 0);
 
         const hVel = Math.sqrt(flyVelocity.x**2 + flyVelocity.z**2);
         document.getElementById('vel').innerText = hVel.toFixed(0);
@@ -59,7 +57,6 @@ export function updatePhysics(dt, camera, controls) {
         return;
     }
 
-    // Height Logic
     const targetHeight = keys.crouch ? PHYSICS_CONSTANTS.CROUCH_HEIGHT : PHYSICS_CONSTANTS.PLAYER_HEIGHT;
     currentHeight += (targetHeight - currentHeight) * 10.0 * dt;
 
@@ -99,13 +96,10 @@ export function updatePhysics(dt, camera, controls) {
         }
     }
 
-    // 1. Apply Velocity
     playerPos.addScaledVector(velocity, dt);
 
-    // 2. Resolve Wall Collisions (Tree Trunks/Leaves)
     resolveTreeCollisions(dt);
 
-    // 3. Ground / Floor Check
     const terrainH = getTerrainHeight(playerPos.x, playerPos.z);
     const treeH = getTreeHeight(playerPos.x, playerPos.z, playerPos.y);
     const groundH = Math.max(terrainH, treeH);
@@ -166,27 +160,18 @@ function resolveTreeCollisions(dt) {
         const widthScale = t.s || 1.0;
         const heightScale = t.hs || 1.0;
 
-        // Trunk Collision
-        // Geometry: Cylinder(0.4, 0.8, 3, 5) -> Radius 0.8? Wait, resources.js says:
-        // trunkGeo = CylinderGeometry(0.4, 0.8, 3, 5). TopRad=0.4, BotRad=0.8, Height=3.
-        // Scaled Radius approx 0.6 (avg) * widthScale. Let's use max radius 0.8 * scale.
         const trunkRadius = 0.8 * widthScale;
         const trunkHeight = 3.0 * heightScale;
         const trunkH_Max = treeBaseY + trunkHeight;
 
         if (playerPos.y >= treeBaseY && playerPos.y <= trunkH_Max + 1.0) { 
              if (dist < trunkRadius + PLAYER_RADIUS) {
-                 // Push out
                  const pushDir = new THREE.Vector3(dx, 0, dz).normalize();
                  const overlap = (trunkRadius + PLAYER_RADIUS) - dist;
                  playerPos.addScaledVector(pushDir, overlap);
              }
         }
 
-        // Leaves Collision
-        // Geometry: ConeGeometry(3, 7, 6). Radius=3, Height=7.
-        // Translate(0, 5.5, 0) -> starts at 2.0 (5.5 - 3.5). Ends at 9.0.
-        // Scaled Y offsets: 
         const leafStart = treeBaseY + (2.0 * heightScale);
         const leafEnd = treeBaseY + (9.0 * heightScale);
         const leafMaxRadius = 3.0 * widthScale;
@@ -194,22 +179,15 @@ function resolveTreeCollisions(dt) {
         
         if (playerPos.y > leafStart && playerPos.y < leafEnd) {
             const relY = playerPos.y - leafStart;
-            // Cone radius at height y: R * (1 - y/H)
             const r = leafMaxRadius * (1.0 - relY / leafHeight);
             
             if (dist < r + PLAYER_RADIUS) {
                 const horizontalOverlap = (r + PLAYER_RADIUS) - dist;
                 
-                // Heuristic: Which way is the "exit" closer?
-                // If we are closer to the bottom (relY) than the side (horizontalOverlap),
-                // treat it as a ceiling hit (bonk head).
-                // This handles uncrouching under a tree or walking up a hill into leaves
-                // without teleporting the player sideways.
                 if (relY < horizontalOverlap) {
                     playerPos.y = leafStart - 0.05;
                     if (velocity.y > 0) velocity.y = 0;
                 } else {
-                    // Closer to the side -> Slide/Push Out
                     const pushDir = new THREE.Vector3(dx, 0, dz).normalize();
                     playerPos.addScaledVector(pushDir, horizontalOverlap);
                 }
@@ -231,9 +209,8 @@ function getTreeHeight(x, z, currentY) {
         const widthScale = t.s || 1.0;
         const heightScale = t.hs || 1.0;
 
-        // Trunk Top
         const trunkRadius = 0.8 * widthScale;
-        const trunkTopY = treeBaseY + (3.0 * heightScale); // Approx trunk top
+        const trunkTopY = treeBaseY + (3.0 * heightScale);
 
         if (dist < trunkRadius) {
             if (currentY >= trunkTopY - 0.5) { 
@@ -241,13 +218,11 @@ function getTreeHeight(x, z, currentY) {
             }
         }
 
-        // Leaves Top (Cone Surface)
         const leafMaxRadius = 3.0 * widthScale;
         const leafHeight = 7.0 * heightScale;
         const leafStart = treeBaseY + (2.0 * heightScale);
 
         if (dist < leafMaxRadius) {
-            // h = H * (1 - d/R)
             const heightFromBase = leafHeight * (1.0 - dist / leafMaxRadius);
             const surfaceY = leafStart + heightFromBase;
             

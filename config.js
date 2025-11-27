@@ -10,8 +10,8 @@ export const CURVATURE_STRENGTH = 0.0025;
 export const DEFAULTS = {
     MOVE_SPEED: 7.0,
     SPRINT_SPEED: 14.0,
-    JUMP_FORCE: 22.0, // Increased for snappier jump
-    GRAVITY: 70.0,    // Increased significantly to reduce floatiness
+    JUMP_FORCE: 22.0,
+    GRAVITY: 70.0,
     SENSITIVITY: 1.0,
     MAX_AIR_SPEED: 3.5
 };

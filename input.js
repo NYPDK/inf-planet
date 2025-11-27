@@ -18,7 +18,6 @@ export function initInput() {
     });
     document.addEventListener('keyup', e => onKey(e.code, false, e));
 
-    // Prevent accidental tab closing
     window.addEventListener('beforeunload', (e) => {
         e.preventDefault();
         e.returnValue = '';

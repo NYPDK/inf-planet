@@ -9,15 +9,11 @@ const dummy = new THREE.Object3D();
 
 export function getTerrainHeight(x, z) {
     let y = 0;
-    // Ridged Multifractal Noise for smoother hills and valleys
     let n = noise2D(x * 0.008, z * 0.008);
-    // Reduce exponent for rounder peaks, keep amplitude
     y += Math.pow(1.0 - Math.abs(n), 1.5) * 15.0; 
     
-    // Secondary layer for detail, slightly less intense
     y += noise2D(x * 0.04, z * 0.04) * 4.0;
     
-    // Shift up to create more accessible water level
     y -= 10.0; 
     
     return y;
@@ -26,17 +22,16 @@ export function getTerrainHeight(x, z) {
 function createChunk(cx, cz, scene) {
     const group = new THREE.Group();
     
-    // 1. Terrain
     const geometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, 32, 32);
     geometry.rotateX(-Math.PI / 2);
     const posAttr = geometry.attributes.position;
     
     const colors = [];
     const color = new THREE.Color();
-    const c1 = new THREE.Color(0xd2b48c); // Sand
-    const c2 = new THREE.Color(0x4a6b36); // Grass
-    const c3 = new THREE.Color(0x1a330a); // Forest
-    const c4 = new THREE.Color(0x8a8a8a); // High Rock (original)
+    const c1 = new THREE.Color(0xd2b48c);
+    const c2 = new THREE.Color(0x4a6b36);
+    const c3 = new THREE.Color(0x1a330a);
+    const c4 = new THREE.Color(0x8a8a8a);
 
     for (let i = 0; i < posAttr.count; i++) {
         const x = posAttr.getX(i) + cx * CHUNK_SIZE;
@@ -44,16 +39,15 @@ function createChunk(cx, cz, scene) {
         const h = getTerrainHeight(x, z);
         posAttr.setY(i, h);
 
-        // Smooth Biome Blending (Lerp)
-        if (h < -4.0) { // Sand
+        if (h < -4.0) {
              color.copy(c1);
-        } else if (h < 0.0) { // Sand to Grass transition
+        } else if (h < 0.0) {
              const t = (h - (-4.0)) / 4.0;
              color.lerpColors(c1, c2, t);
-        } else if (h < 8.0) { // Grass to Forest transition
+        } else if (h < 8.0) {
              const t = h / 8.0;
              color.lerpColors(c2, c3, t);
-        } else { // Forest to High Rock
+        } else {
              const t = Math.min(1.0, (h - 8.0) / 10.0);
              color.lerpColors(c3, c4, t);
         }
@@ -63,24 +57,16 @@ function createChunk(cx, cz, scene) {
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geometry.computeVertexNormals();
     const terrain = new THREE.Mesh(geometry, materials.groundMat);
-    terrain.receiveShadow = false;
-    terrain.castShadow = false;
     group.add(terrain);
 
-    // 2. Instanced Objects
     const trunkMesh = new THREE.InstancedMesh(geometries.trunkGeo, materials.trunkMat, TREE_COUNT);
     const leavesMesh = new THREE.InstancedMesh(geometries.leavesGeo, materials.treeMat, TREE_COUNT);
     const grassMesh = new THREE.InstancedMesh(geometries.grassGeo, materials.grassMat, GRASS_COUNT);
+    const grassDryMesh = new THREE.InstancedMesh(geometries.grassGeo, materials.grassDryMat, GRASS_COUNT);
     
-    leavesMesh.castShadow = false;
-    trunkMesh.receiveShadow = false;
-    trunkMesh.castShadow = false;
-    grassMesh.castShadow = false;
-
-    const existingTrees = []; 
+    const existingTrees = [];
 
     let treeIdx = 0;
-    // Attempt more placements to find valid spots in dense areas
     for (let i = 0; i < TREE_COUNT * 3; i++) { 
         if (treeIdx >= TREE_COUNT) break;
 
@@ -90,10 +76,8 @@ function createChunk(cx, cz, scene) {
         const wz = cz * CHUNK_SIZE + rz;
         const h = getTerrainHeight(wx, wz);
 
-        // Forest Density Map
-        const density = noise2D(wx * 0.02, wz * 0.02); // Large scale features
+        const density = noise2D(wx * 0.02, wz * 0.02);
 
-        // Only spawn trees if density is high enough (clumping)
         if (density < 0.2) continue; 
 
         let tooClose = false;
@@ -123,14 +107,15 @@ function createChunk(cx, cz, scene) {
             existingTrees.push({
                 x: rx + cx * CHUNK_SIZE, 
                 z: rz + cz * CHUNK_SIZE,
-                s: scale,       // Width scale
-                hs: heightScale // Height scale
+                s: scale,
+                hs: heightScale
             }); 
             treeIdx++;
         }
     }
 
     let grassIdx = 0;
+    let grassDryIdx = 0;
     for (let i = 0; i < GRASS_COUNT; i++) {
         const rx = (Math.random() - 0.5) * CHUNK_SIZE;
         const rz = (Math.random() - 0.5) * CHUNK_SIZE;
@@ -138,7 +123,7 @@ function createChunk(cx, cz, scene) {
         const wz = cz * CHUNK_SIZE + rz;
         const h = getTerrainHeight(wx, wz);
 
-        if (h > -5.0) { // Only spawn grass above water 
+        if (h >= 0.0) {
             dummy.position.set(rx, h, rz);
             const s = 0.8 + Math.random() * 0.5;
             dummy.scale.set(s, s, s);
@@ -146,6 +131,15 @@ function createChunk(cx, cz, scene) {
             dummy.updateMatrix();
             grassMesh.setMatrixAt(grassIdx, dummy.matrix);
             grassIdx++;
+        } else if (h > -5.0) {
+            // Sand / beach zone uses dry grass
+            dummy.position.set(rx, h, rz);
+            const s = 0.8 + Math.random() * 0.5;
+            dummy.scale.set(s, s, s);
+            dummy.rotation.set(0, Math.random() * Math.PI, 0);
+            dummy.updateMatrix();
+            grassDryMesh.setMatrixAt(grassDryIdx, dummy.matrix);
+            grassDryIdx++;
         }
     }
 
@@ -158,6 +152,10 @@ function createChunk(cx, cz, scene) {
     if (grassIdx > 0) {
         grassMesh.count = grassIdx;
         group.add(grassMesh);
+    }
+    if (grassDryIdx > 0) {
+        grassDryMesh.count = grassDryIdx;
+        group.add(grassDryMesh);
     }
 
     group.userData = { trees: existingTrees };
