@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Infinite Terrain & Bhop v2.1</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Infinite Terrain & Bhop v2.6</title>
     <link rel="stylesheet" href="style.css">
     <script type="importmap">
         {
@@ -19,7 +22,7 @@
         Pos: <span id="pos">0, 0</span>
     </div>
     <div id="instructions">
-        <h1>B-Hop Terrain v2.1</h1>
+        <h1>B-Hop Terrain v2.6</h1>
         <p>Click to Capture Mouse</p>
         <p><span class="key">WASD</span> Move | <span class="key">SPACE</span> Jump</p>
         <p><span class="key">SHIFT</span> Sprint | <span class="key">C</span> Crouch</p>
@@ -73,6 +76,15 @@
     
     <canvas id="largeMap" style="display: none; position: absolute; top: 0; left: 0; z-index: 100; width: 100%; height: 100%; cursor: grab;"></canvas>
 
-    <script type="module" src="main.js"></script>
+    <script>
+        // Cache-bust local assets every load
+        const cacheBust = 'v=' + Date.now();
+        const style = document.querySelector('link[rel=stylesheet]');
+        if (style) style.href = `style.css?${cacheBust}`;
+        const script = document.createElement('script');
+        script.type = 'module';
+        script.src = `main.js?${cacheBust}`;
+        document.head.appendChild(script);
+    </script>
 </body>
 </html>

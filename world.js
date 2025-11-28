@@ -12,17 +12,26 @@ const removeQueue = [];
 const removeQueueSet = new Set();
 const MAX_CHUNK_BUILDS_PER_FRAME = 1;
 const MAX_CHUNK_REMOVES_PER_FRAME = 1;
+const SMOOTH_SAMPLE_DIST = 1.5;
 
-export function getTerrainHeight(x, z) {
+function rawTerrainHeight(x, z) {
     let y = 0;
     let n = noise2D(x * 0.008, z * 0.008);
     y += Math.pow(1.0 - Math.abs(n), 1.5) * 15.0; 
-    
     y += noise2D(x * 0.04, z * 0.04) * 4.0;
-    
     y -= 10.0; 
-    
     return y;
+}
+
+export function getTerrainHeight(x, z) {
+    // Smooth peaks by blending neighboring samples; center weighted to keep form while softening ridges.
+    const d = SMOOTH_SAMPLE_DIST;
+    const h0 = rawTerrainHeight(x, z);
+    const h1 = rawTerrainHeight(x + d, z);
+    const h2 = rawTerrainHeight(x - d, z);
+    const h3 = rawTerrainHeight(x, z + d);
+    const h4 = rawTerrainHeight(x, z - d);
+    return (h0 * 2 + h1 + h2 + h3 + h4) / 6;
 }
 
 function createChunk(cx, cz, scene) {
@@ -153,7 +162,9 @@ function createChunk(cx, cz, scene) {
         const h = getTerrainHeight(wx, wz);
 
         if (h >= 0.0) {
-            dummy.position.set(rx, h, rz);
+            const slope = Math.abs(getTerrainHeight(wx + 0.5, wz) - h) + Math.abs(getTerrainHeight(wx, wz + 0.5) - h);
+            const embed = 0.05 + Math.min(0.18, slope * 0.08);
+            dummy.position.set(rx, h - embed, rz);
             const s = 0.8 + Math.random() * 0.5;
             dummy.scale.set(s, s, s);
             dummy.rotation.set(0, Math.random() * Math.PI, 0);
@@ -162,7 +173,9 @@ function createChunk(cx, cz, scene) {
             grassIdx++;
         } else if (h > -5.0) {
             // Sand / beach zone uses dry grass
-            dummy.position.set(rx, h, rz);
+            const slope = Math.abs(getTerrainHeight(wx + 0.5, wz) - h) + Math.abs(getTerrainHeight(wx, wz + 0.5) - h);
+            const embed = 0.05 + Math.min(0.18, slope * 0.08);
+            dummy.position.set(rx, h - embed, rz);
             const s = 0.8 + Math.random() * 0.5;
             dummy.scale.set(s, s, s);
             dummy.rotation.set(0, Math.random() * Math.PI, 0);

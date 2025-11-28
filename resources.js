@@ -7,7 +7,8 @@ export const materials = {};
 export const geometries = {};
 export let waterMesh;
 
-export function initResources(scene, globalShaderUniforms) {
+export function initResources(scene, globalShaderUniforms, maxAnisotropy = 1) {
+    const targetAniso = Math.max(1, Math.min(4, maxAnisotropy || 1));
     const shaderUniforms = globalShaderUniforms || {
         uCurvature: { value: 0.0 },
         uBendCenter: { value: new THREE.Vector3() }
@@ -16,11 +17,14 @@ export function initResources(scene, globalShaderUniforms) {
     const textureLoader = new THREE.TextureLoader();
     const grassTexture = textureLoader.load('textures/tall-grass-texture.png');
     grassTexture.colorSpace = THREE.SRGBColorSpace;
+    grassTexture.anisotropy = targetAniso;
     const grassDryTexture = textureLoader.load('textures/tall-grass-dry-texture.png');
     grassDryTexture.colorSpace = THREE.SRGBColorSpace;
+    grassDryTexture.anisotropy = targetAniso;
     const GRASS_ALPHA_TEST = 0.5;
 
     const groundBump = generateNoiseTexture();
+    groundBump.anisotropy = targetAniso;
 
     materials.groundMat = new THREE.MeshStandardMaterial({ 
         vertexColors: true, 

@@ -4,7 +4,7 @@ import Stats from 'three/addons/libs/stats.module.js';
 import { initInput } from './input.js';
 import { initResources, waterMesh } from './resources.js';
 import { initClouds, updateClouds } from './clouds.js';
-import { updateChunks, getTerrainHeight } from './world.js';
+import { updateChunks, getTerrainHeight, activeChunks } from './world.js';
 import { updatePhysics, playerPos } from './physics.js';
 import { initUI, updateUI } from './ui.js';
 import { CHUNK_SIZE, RENDER_DISTANCE, CURVATURE_STRENGTH, DEFAULTS, GRAPHICS_SETTINGS } from './config.js';
@@ -27,13 +27,20 @@ renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.shadowMap.autoUpdate = false;
 renderer.shadowMap.needsUpdate = true; // ensure first frame renders shadows
 document.body.appendChild(renderer.domElement);
+const TARGET_ANISOTROPY = Math.min(4, renderer.capabilities.getMaxAnisotropy());
 
 let currentPixelRatio = 1;
-const MIN_PIXEL_RATIO = 0.5;
+const MIN_PIXEL_RATIO = 0.25;
 const MAX_PIXEL_RATIO = 1;
 const FPS_CHECK_INTERVAL = 500; // ms
 let fpsCheckTimer = 0;
 let framesSinceLastCheck = 0;
+let slowRecoverTimer = 0;
+const RECOVER_INTERVAL = 2000; // ms
+const UPSCALE_STEP = 0.05;
+const DYNRES_MIN_INTERVAL = 1500; // ms
+let lastDynResChange = 0;
+const MAX_FRAME_DELTA = 0.05; // clamp large frame gaps to avoid jittery input/physics
 
 const globalShaderUniforms = {
     uCurvature: { value: CURVATURE_STRENGTH },
@@ -75,25 +82,39 @@ const _boidSeparate = new THREE.Vector3();
 const _boidNeighbor = new THREE.Vector3();
 const _boidNeighborVel = new THREE.Vector3();
 const _lastShadowAnchor = new THREE.Vector3(Infinity, Infinity, Infinity);
+const _camDir = new THREE.Vector3();
+const _groundNormal = new THREE.Vector3();
+const _swirlVec = new THREE.Vector3();
 
 const PARTICLE_COUNT = 500;
-const PARTICLE_RADIUS = CHUNK_SIZE * (RENDER_DISTANCE - 0.5);
+// Tether radius tightened so particles recycle sooner when far/out of view
+const PARTICLE_RADIUS = CHUNK_SIZE * (RENDER_DISTANCE - 1.0);
 const PARTICLE_REPEL_RADIUS = 5.0;
 const PARTICLE_REPEL_STRENGTH = 32.0;
-const PARTICLE_WIND = new THREE.Vector3(0.3, 0.05, 0.35);
+const PARTICLE_WIND_MAX = 0.9;
+const PARTICLE_WIND_CHANGE_INTERVAL = 6.0;
+const PARTICLE_SWIRL_BASE = 1.2;
 const PARTICLE_MAX_UPDATES_PER_FRAME = 2000;
 const PARTICLE_MAX_HEIGHT_ABOVE_GROUND = 20.0;
 const PARTICLE_MIN_CLEARANCE = 0.5;
+const PARTICLE_GROUND_SOFT_CLEAR = 1.0;
+const PARTICLE_GROUND_PUSH = 8.0;
 const PARTICLE_WATER_MIN_Y = -4.5;
+const PARTICLE_SOFT_CEILING = 0.8; // fraction of max height to begin easing
+const PARTICLE_CEILING_PUSH = 6.0;
 const PARTICLE_CLUSTER_COUNT = 12;
 const PARTICLE_CLUSTER_RADIUS = 4.5;
 const PARTICLE_CLUSTER_SPREAD = 1.5;
+const PARTICLE_CLUSTER_DRIFT_SPEED = 2.0;
+const PARTICLE_CLUSTER_DRIFT_CHANGE_INTERVAL = 4.0;
+const PARTICLE_FRONT_CONE_COS = 0.766; // ~40 degrees
+const PARTICLE_FRONT_AVOID_DISTANCE = 12.0;
 const BOID_NEIGHBOR_RADIUS = 3.5;
 const BOID_SAMPLE_COUNT = 12;
 const BOID_ALIGN_WEIGHT = 3.0;
 const BOID_COHESION_WEIGHT = 2.0;
 const BOID_SEPARATION_WEIGHT = 6.0;
-const BOID_MAX_SPEED = 16.0;
+const BOID_MAX_SPEED = 12.0;
 const particleGeometry = new THREE.BufferGeometry();
 const particlePositions = new Float32Array(PARTICLE_COUNT * 3);
 const particleVelocities = new Float32Array(PARTICLE_COUNT * 3);
@@ -103,13 +124,19 @@ let particleMaterialUniforms;
 let particleAspect = 1.0;
 let particleUpdateOffset = 0;
 const particleClusterOffsets = [];
+const particleClusterDrift = [];
+const particleClusterDriftTimer = [];
+const particleClusterSwirl = [];
 const particleClusterIds = new Uint16Array(PARTICLE_COUNT);
+const _globalWind = new THREE.Vector3(0.25, 0.02, 0.25);
+const _windTarget = new THREE.Vector3(0.25, 0.02, 0.25);
+let windTimer = PARTICLE_WIND_CHANGE_INTERVAL;
 
 const controls = new PointerLockControls(camera, document.body);
 controls.addEventListener('lock', () => scheduleRefreshDetect(200));
 
 initInput();
-initResources(scene, globalShaderUniforms);
+initResources(scene, globalShaderUniforms, TARGET_ANISOTROPY);
 initClouds(scene, globalShaderUniforms);
 initUI(controls);
 initAirParticles();
@@ -141,8 +168,6 @@ fpsPanel.dom = stats.dom; // ensure same container for layout
 let tickCounter = 0;
 let tickTimer = 0;
 let lastRenderTime = performance.now();
-let lastFrameTime = 0;
-let frameAccumulator = 0;
 let smoothedRfps = 0;
 let bestDetectedHz = 0;
 let detectInProgress = false;
@@ -214,6 +239,77 @@ function clampParticleHeight(pos) {
     if (pos.y > maxY) pos.y = maxY;
 }
 
+function getGroundNormal(x, z) {
+    const eps = 0.6;
+    const hL = getTerrainHeight(x - eps, z);
+    const hR = getTerrainHeight(x + eps, z);
+    const hD = getTerrainHeight(x, z - eps);
+    const hU = getTerrainHeight(x, z + eps);
+    _groundNormal.set(-(hR - hL), 2 * eps, -(hU - hD)).normalize();
+    return _groundNormal;
+}
+
+function updateClusterOffsets(dt) {
+    for (let i = 0; i < PARTICLE_CLUSTER_COUNT; i++) {
+        particleClusterDriftTimer[i] -= dt;
+        if (particleClusterDriftTimer[i] <= 0) {
+            particleClusterDrift[i].copy(randomInSphere(PARTICLE_CLUSTER_DRIFT_SPEED));
+            particleClusterDriftTimer[i] = PARTICLE_CLUSTER_DRIFT_CHANGE_INTERVAL;
+        }
+        particleClusterOffsets[i].addScaledVector(particleClusterDrift[i], dt);
+        if (particleClusterOffsets[i].length() > PARTICLE_RADIUS * 0.75) {
+            particleClusterOffsets[i].multiplyScalar(0.8);
+        }
+    }
+}
+
+function obstacleAvoidance(pos, vel, dt) {
+    // Ground avoidance
+    const groundY = getTerrainHeight(pos.x, pos.z);
+    const groundNormal = getGroundNormal(pos.x, pos.z);
+    const clearance = pos.y - groundY;
+    const desiredY = groundY + PARTICLE_MIN_CLEARANCE + 0.6;
+    if (clearance < PARTICLE_GROUND_SOFT_CLEAR) {
+        const push = Math.min((PARTICLE_GROUND_SOFT_CLEAR - clearance) * PARTICLE_GROUND_PUSH * dt, PARTICLE_GROUND_PUSH * dt);
+        vel.addScaledVector(groundNormal, push);
+    }
+    if (pos.y < desiredY) {
+        vel.y += (desiredY - pos.y) * PARTICLE_GROUND_PUSH * 0.35 * dt;
+    }
+
+    // Soft ceiling to avoid flattening at the hard clamp
+    const ceilingY = groundY + PARTICLE_MAX_HEIGHT_ABOVE_GROUND * PARTICLE_SOFT_CEILING;
+    if (pos.y > ceilingY) {
+        const over = pos.y - ceilingY;
+        vel.y -= over * PARTICLE_CEILING_PUSH * dt;
+    }
+
+    // Tree avoidance (sample nearby chunks)
+    const cx = Math.floor(pos.x / CHUNK_SIZE);
+    const cz = Math.floor(pos.z / CHUNK_SIZE);
+    const maxDist2 = 6 * 6;
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dz = -1; dz <= 1; dz++) {
+            const key = `${cx + dx},${cz + dz}`;
+            const chunk = activeChunks.get(key);
+            if (!chunk || !chunk.userData || !chunk.userData.trees) continue;
+            const trees = chunk.userData.trees;
+            for (let t = 0; t < trees.length; t++) {
+                const tree = trees[t];
+                const dxp = pos.x - tree.x;
+                const dzp = pos.z - tree.z;
+                const dist2 = dxp * dxp + dzp * dzp;
+                if (dist2 < maxDist2 && dist2 > 0.0001) {
+                    const dist = Math.sqrt(dist2);
+                    const push = (maxDist2 - dist2) / maxDist2;
+                    vel.x += (dxp / dist) * push * 10.0 * dt;
+                    vel.z += (dzp / dist) * push * 10.0 * dt;
+                }
+            }
+        }
+    }
+}
+
 function randomInSphere(radius) {
     const u = Math.random();
     const v = Math.random();
@@ -228,6 +324,38 @@ function randomInSphere(radius) {
     );
 }
 
+function updateWind(dt) {
+    windTimer -= dt;
+    if (windTimer <= 0) {
+        _windTarget.copy(randomInSphere(PARTICLE_WIND_MAX));
+        _windTarget.y *= 0.2; // keep mostly horizontal
+        windTimer = PARTICLE_WIND_CHANGE_INTERVAL;
+    }
+    _globalWind.lerp(_windTarget, Math.min(1, dt * 0.5));
+}
+
+function isInFrontCone(pos) {
+    camera.getWorldDirection(_camDir);
+    _tmpOffset.subVectors(pos, camera.position);
+    const dist = _tmpOffset.length();
+    if (dist < 0.0001) return true;
+    _tmpOffset.normalize();
+    return dist < PARTICLE_FRONT_AVOID_DISTANCE && _tmpOffset.dot(_camDir) > PARTICLE_FRONT_CONE_COS;
+}
+
+function findSpawnNear(clusterCenter) {
+    let candidate = null;
+    for (let tries = 0; tries < 6; tries++) {
+        const c = randomInSphere(PARTICLE_CLUSTER_SPREAD).add(clusterCenter);
+        if (!isInFrontCone(c)) {
+            candidate = c;
+            break;
+        }
+        if (!candidate) candidate = c;
+    }
+    return candidate;
+}
+
 function getClusterCenter(idx, out) {
     const offset = particleClusterOffsets[idx % PARTICLE_CLUSTER_COUNT];
     return out.copy(camera.position).add(offset);
@@ -235,9 +363,17 @@ function getClusterCenter(idx, out) {
 
 function initAirParticles() {
     particleClusterOffsets.length = 0;
+    particleClusterDrift.length = 0;
+    particleClusterDriftTimer.length = 0;
+    particleClusterSwirl.length = 0;
     for (let c = 0; c < PARTICLE_CLUSTER_COUNT; c++) {
         const offset = randomInSphere(PARTICLE_RADIUS * 0.6);
         particleClusterOffsets.push(offset);
+        particleClusterDrift.push(randomInSphere(PARTICLE_CLUSTER_DRIFT_SPEED));
+        particleClusterDriftTimer.push(Math.random() * PARTICLE_CLUSTER_DRIFT_CHANGE_INTERVAL);
+        const swirlDir = Math.random() < 0.5 ? -1 : 1;
+        const swirlSpeed = PARTICLE_SWIRL_BASE * (0.6 + Math.random() * 0.9);
+        particleClusterSwirl.push(swirlDir * swirlSpeed);
     }
 
     for (let i = 0; i < PARTICLE_COUNT; i++) {
@@ -245,7 +381,7 @@ function initAirParticles() {
         const clusterId = i % PARTICLE_CLUSTER_COUNT;
         particleClusterIds[i] = clusterId;
         const cluster = getClusterCenter(clusterId, _tmpVec);
-        const p = randomInSphere(PARTICLE_CLUSTER_SPREAD).add(cluster);
+        const p = findSpawnNear(cluster);
         clampParticleHeight(p);
         particlePositions[base] = p.x;
         particlePositions[base + 1] = p.y;
@@ -262,7 +398,7 @@ function initAirParticles() {
         }
     });
     particleTexture.colorSpace = THREE.SRGBColorSpace;
-    particleTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    particleTexture.anisotropy = TARGET_ANISOTROPY;
     particleTexture.minFilter = THREE.LinearFilter;
     particleTexture.magFilter = THREE.LinearFilter;
     particleTexture.generateMipmaps = false;
@@ -357,6 +493,8 @@ function initAirParticles() {
 
 function updateAirParticles(dt) {
     if (!particlePoints) return;
+    updateWind(dt);
+    updateClusterOffsets(dt);
     const positions = particleGeometry.attributes.position.array;
     const velocities = particleVelocities;
     let needsUpdate = false;
@@ -371,6 +509,7 @@ function updateAirParticles(dt) {
         _tmpVel.set(velocities[base], velocities[base + 1], velocities[base + 2]);
         const clusterId = particleClusterIds[i];
         const clusterCenter = getClusterCenter(clusterId, _boidNeighbor);
+        const swirlStrength = particleClusterSwirl[clusterId] || PARTICLE_SWIRL_BASE;
 
         // Boid neighbors (sampled)
         _boidCenter.set(0, 0, 0);
@@ -415,6 +554,15 @@ function updateAirParticles(dt) {
             _tmpVel.addScaledVector(_boidSeparate, dt);
         }
 
+        // Swirl around cluster center for more organic motion
+        _swirlVec.set(_tmpVec.x - clusterCenter.x, 0, _tmpVec.z - clusterCenter.z);
+        const swirlLen2 = _swirlVec.lengthSq();
+        if (swirlLen2 > 0.0001) {
+            const swirlLen = Math.sqrt(swirlLen2);
+            _swirlVec.set(-_swirlVec.z / swirlLen, 0, _swirlVec.x / swirlLen);
+            _tmpVel.addScaledVector(_swirlVec, swirlStrength * dt);
+        }
+
         // Repel near player
         _tmpOffset.subVectors(_tmpVec, camera.position);
         const dist = _tmpOffset.length();
@@ -430,7 +578,8 @@ function updateAirParticles(dt) {
             _tmpVel.z += (Math.random() - 0.5) * 8.0 * dt;
         }
 
-        _tmpVel.addScaledVector(PARTICLE_WIND, dt);
+        // Apply mild wind, scaled down slightly to keep speeds reasonable
+        _tmpVel.addScaledVector(_globalWind, dt * 0.65);
 
         const speed = _tmpVel.length();
         if (speed > BOID_MAX_SPEED) {
@@ -438,11 +587,16 @@ function updateAirParticles(dt) {
         }
 
         _tmpVec.addScaledVector(_tmpVel, dt);
+        obstacleAvoidance(_tmpVec, _tmpVel, dt);
+        // Mild vertical damping to reduce ceiling presses
+        _tmpVel.y *= 0.98;
 
         // Keep particles around the player
         _tmpOffset.subVectors(_tmpVec, camera.position);
-        if (_tmpOffset.length() > PARTICLE_RADIUS) {
-            const newPos = randomInSphere(PARTICLE_CLUSTER_SPREAD).add(clusterCenter);
+        const distToPlayer = _tmpOffset.length();
+        const behindCam = _tmpOffset.normalize().dot(_camDir) < -0.2;
+        if (distToPlayer > PARTICLE_RADIUS || (behindCam && distToPlayer > PARTICLE_RADIUS * 0.8)) {
+            const newPos = findSpawnNear(clusterCenter);
             clampParticleHeight(newPos);
             _tmpVec.copy(newPos);
             _tmpVel.set((Math.random() - 0.5) * 4.0, (Math.random() - 0.5) * 4.0, (Math.random() - 0.5) * 4.0);
@@ -462,26 +616,12 @@ function updateAirParticles(dt) {
 
 function animate(now) {
     if (now === undefined) now = performance.now();
-    if (lastFrameTime === 0) lastFrameTime = now;
 
     const targetFps = Math.max(MIN_FPS_CAP, getEffectiveTargetFps());
-    const minInterval = 1000 / targetFps;
-
-    const delta = now - lastFrameTime;
-    lastFrameTime = now;
-    frameAccumulator += delta;
-
-    // If we haven't reached the desired interval yet, skip rendering this tick but stay on rAF timing.
-    if (frameAccumulator + 0.25 < minInterval) {
-        requestAnimationFrame(animate);
-        return;
-    }
-    // Carry over any excess so we keep tight pacing without drifting downwards.
-    frameAccumulator = Math.max(0, frameAccumulator - minInterval);
 
     stats.begin();
 
-    const dt = clock.getDelta();
+    const dt = Math.min(clock.getDelta(), MAX_FRAME_DELTA);
     physicsAccumulator += dt;
     let stepsThisFrame = 0;
 
@@ -562,22 +702,42 @@ function animate(now) {
     // Dynamic Resolution Logic
     fpsCheckTimer += frameDtMs;
     framesSinceLastCheck++;
+    slowRecoverTimer += frameDtMs;
 
     if (fpsCheckTimer > FPS_CHECK_INTERVAL) {
         const avgFps = (framesSinceLastCheck / fpsCheckTimer) * 1000;
-        // Cap dynamic resolution target at 144 to avoid downscaling for impossible targets (like 1000 FPS)
-        const dynResTarget = Math.min(144, getEffectiveTargetFps());
+        // Keep the dynamic resolution target at or below the measured refresh so we can recover upward
+        // after a drop instead of chasing an unreachable high target.
+        const effectiveTarget = getEffectiveTargetFps();
+        const displayCap = bestDetectedHz || effectiveTarget;
+        const dynResTarget = Math.min(displayCap, effectiveTarget);
         
-        if (avgFps < dynResTarget - 10 && currentPixelRatio > MIN_PIXEL_RATIO) {
-            currentPixelRatio = Math.max(MIN_PIXEL_RATIO, currentPixelRatio - 0.1);
-            renderer.setPixelRatio(currentPixelRatio);
-        } else if (avgFps > dynResTarget + 10 && currentPixelRatio < MAX_PIXEL_RATIO) {
-            currentPixelRatio = Math.min(MAX_PIXEL_RATIO, currentPixelRatio + 0.1);
-            renderer.setPixelRatio(currentPixelRatio);
+        const canAdjust = (nowFrame - lastDynResChange) > DYNRES_MIN_INTERVAL;
+        if (canAdjust && avgFps < dynResTarget - 10 && currentPixelRatio > MIN_PIXEL_RATIO) {
+            const nextRatio = Math.max(MIN_PIXEL_RATIO, currentPixelRatio - 0.05);
+            if (Math.abs(nextRatio - currentPixelRatio) > 0.001) {
+                currentPixelRatio = nextRatio;
+                renderer.setPixelRatio(currentPixelRatio);
+                lastDynResChange = nowFrame;
+            }
         }
         
         fpsCheckTimer = 0;
         framesSinceLastCheck = 0;
+    }
+
+    // Gentle recovery probing: if we've been stable for a while and still below max ratio, try nudging up.
+    if (slowRecoverTimer > RECOVER_INTERVAL && currentPixelRatio < MAX_PIXEL_RATIO) {
+        const safeHeadroomFps = smoothedRfps || targetFps;
+        if (safeHeadroomFps > targetFps - 5) {
+            const nextRatio = Math.min(MAX_PIXEL_RATIO, currentPixelRatio + UPSCALE_STEP);
+            if (Math.abs(nextRatio - currentPixelRatio) > 0.001) {
+                currentPixelRatio = nextRatio;
+                renderer.setPixelRatio(currentPixelRatio);
+                slowRecoverTimer = 0;
+                lastDynResChange = performance.now();
+            }
+        }
     }
 
     if (waterMesh) {

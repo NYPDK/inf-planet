@@ -23,6 +23,12 @@ const _right = new THREE.Vector3();
 const _wishDir = new THREE.Vector3();
 const _xAxis = new THREE.Vector3(1, 0, 0);
 const _zAxis = new THREE.Vector3(0, 0, -1);
+const _up = new THREE.Vector3(0, 1, 0);
+const _slopeVec = new THREE.Vector3();
+
+const MAX_WALKABLE_SLOPE_COS = 0.6; // about 53 degrees
+const STEEP_SLIDE_FORCE = 18.0;
+const GROUND_NORMAL_EPS = 0.6;
 
 export function updatePhysics(dt, camera, controls) {
     if (!controls.isLocked) return;
@@ -97,8 +103,8 @@ export function updatePhysics(dt, camera, controls) {
     resolveTreeCollisions(dt);
 
     const terrainH = getTerrainHeight(playerPos.x, playerPos.z);
-    const treeH = getTreeHeight(playerPos.x, playerPos.z, playerPos.y);
-    const groundH = Math.max(terrainH, treeH);
+    const groundNormal = getGroundNormal(playerPos.x, playerPos.z);
+    const groundH = terrainH;
 
     const distToGround = playerPos.y - (groundH + currentHeight);
 
@@ -112,6 +118,17 @@ export function updatePhysics(dt, camera, controls) {
         onGround = true; 
     } else {
         onGround = false;
+    }
+
+    // If the ground beneath is too steep, force a slide instead of letting the player "walk up" it.
+    const slopeDot = groundNormal.dot(_up);
+    if (onGround && slopeDot < MAX_WALKABLE_SLOPE_COS) {
+        onGround = false;
+        _slopeVec.set(groundNormal.x, 0, groundNormal.z);
+        if (_slopeVec.lengthSq() > 0.0001) {
+            _slopeVec.normalize();
+            velocity.addScaledVector(_slopeVec, STEEP_SLIDE_FORCE * dt);
+        }
     }
 
     if (playerPos.y < -50) {
@@ -186,6 +203,16 @@ function resolveTreeCollisions(dt) {
             }
         }
     }
+}
+
+function getGroundNormal(x, z) {
+    const eps = GROUND_NORMAL_EPS;
+    const hL = getTerrainHeight(x - eps, z);
+    const hR = getTerrainHeight(x + eps, z);
+    const hD = getTerrainHeight(x, z - eps);
+    const hU = getTerrainHeight(x, z + eps);
+    _slopeVec.set(-(hR - hL), 2 * eps, -(hU - hD)).normalize();
+    return _slopeVec;
 }
 
 function getTreeHeight(x, z, currentY) {
