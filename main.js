@@ -7,7 +7,7 @@ import { initClouds, updateClouds } from './clouds.js';
 import { updateChunks, getTerrainHeight } from './world.js';
 import { updatePhysics, playerPos } from './physics.js';
 import { initUI, updateUI } from './ui.js';
-import { CHUNK_SIZE, RENDER_DISTANCE, CURVATURE_STRENGTH } from './config.js';
+import { CHUNK_SIZE, RENDER_DISTANCE, CURVATURE_STRENGTH, DEFAULTS, GRAPHICS_SETTINGS } from './config.js';
 
 const scene = new THREE.Scene();
 const skyColor = 0x6fa8dc;
@@ -15,10 +15,25 @@ scene.background = new THREE.Color(skyColor);
 scene.fog = new THREE.Fog(skyColor, 20, (CHUNK_SIZE * RENDER_DISTANCE) - 10);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ 
+    antialias: true,
+    powerPreference: "high-performance",
+    desynchronized: true 
+});
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(1);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.shadowMap.autoUpdate = false;
+renderer.shadowMap.needsUpdate = true; // ensure first frame renders shadows
 document.body.appendChild(renderer.domElement);
+
+let currentPixelRatio = 1;
+const MIN_PIXEL_RATIO = 0.5;
+const MAX_PIXEL_RATIO = 1;
+const FPS_CHECK_INTERVAL = 500; // ms
+let fpsCheckTimer = 0;
+let framesSinceLastCheck = 0;
 
 const globalShaderUniforms = {
     uCurvature: { value: CURVATURE_STRENGTH },
@@ -27,22 +42,39 @@ const globalShaderUniforms = {
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.5);
 scene.add(hemiLight);
+const SHADOW_FRUSTUM = CHUNK_SIZE * (RENDER_DISTANCE * 2.0);
+const SHADOW_MAP_RES = 4096;
+const SHADOW_TEXEL_SIZE = (SHADOW_FRUSTUM * 2) / SHADOW_MAP_RES;
 const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
-const lightDir = new THREE.Vector3(-0.6, -1.0, -0.6).normalize();
+const lightDir = new THREE.Vector3(-0.6, -0.5, -0.6).normalize();
 const lightDistance = 120;
 const lightOffset = new THREE.Vector3().copy(lightDir).multiplyScalar(-lightDistance);
 dirLight.position.copy(lightOffset);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.width = SHADOW_MAP_RES;
+dirLight.shadow.mapSize.height = SHADOW_MAP_RES;
+dirLight.shadow.camera.near = 0.5;
+dirLight.shadow.camera.far = 500;
+dirLight.shadow.camera.left = -SHADOW_FRUSTUM;
+dirLight.shadow.camera.right = SHADOW_FRUSTUM;
+dirLight.shadow.camera.top = SHADOW_FRUSTUM;
+dirLight.shadow.camera.bottom = -SHADOW_FRUSTUM;
+dirLight.shadow.bias = -0.0001;
+dirLight.shadow.normalBias = 0.02;
+dirLight.shadow.camera.updateProjectionMatrix(); // apply the enlarged shadow frustum so terrain is included
 scene.add(dirLight);
 scene.add(dirLight.target);
 
 const _tmpVec = new THREE.Vector3();
 const _tmpVel = new THREE.Vector3();
 const _tmpOffset = new THREE.Vector3();
+const _shadowAnchor = new THREE.Vector3();
 const _boidCenter = new THREE.Vector3();
 const _boidAlign = new THREE.Vector3();
 const _boidSeparate = new THREE.Vector3();
 const _boidNeighbor = new THREE.Vector3();
 const _boidNeighborVel = new THREE.Vector3();
+const _lastShadowAnchor = new THREE.Vector3(Infinity, Infinity, Infinity);
 
 const PARTICLE_COUNT = 500;
 const PARTICLE_RADIUS = CHUNK_SIZE * (RENDER_DISTANCE - 0.5);
@@ -58,10 +90,10 @@ const PARTICLE_CLUSTER_RADIUS = 4.5;
 const PARTICLE_CLUSTER_SPREAD = 1.5;
 const BOID_NEIGHBOR_RADIUS = 3.5;
 const BOID_SAMPLE_COUNT = 12;
-const BOID_ALIGN_WEIGHT = 0.6;
-const BOID_COHESION_WEIGHT = 0.5;
-const BOID_SEPARATION_WEIGHT = 1.2;
-const BOID_MAX_SPEED = 6.5;
+const BOID_ALIGN_WEIGHT = 3.0;
+const BOID_COHESION_WEIGHT = 2.0;
+const BOID_SEPARATION_WEIGHT = 6.0;
+const BOID_MAX_SPEED = 16.0;
 const particleGeometry = new THREE.BufferGeometry();
 const particlePositions = new Float32Array(PARTICLE_COUNT * 3);
 const particleVelocities = new Float32Array(PARTICLE_COUNT * 3);
@@ -74,6 +106,7 @@ const particleClusterOffsets = [];
 const particleClusterIds = new Uint16Array(PARTICLE_COUNT);
 
 const controls = new PointerLockControls(camera, document.body);
+controls.addEventListener('lock', () => scheduleRefreshDetect(200));
 
 initInput();
 initResources(scene, globalShaderUniforms);
@@ -107,8 +140,70 @@ fpsPanel.dom = stats.dom; // ensure same container for layout
 
 let tickCounter = 0;
 let tickTimer = 0;
-let lastFrameTime = performance.now();
-let smoothFps = 0;
+let lastRenderTime = performance.now();
+let lastFrameTime = 0;
+let frameAccumulator = 0;
+let smoothedRfps = 0;
+let bestDetectedHz = 0;
+let detectInProgress = false;
+let detectTimer = null;
+const MIN_FPS_CAP = 30;
+const DEFAULT_TARGET_FPS = 240;
+const RFPS_SMOOTH = 0.25;
+
+function detectDisplayRefreshRate(samples = 180, warmup = 30) {
+    if (detectInProgress) return Promise.resolve(bestDetectedHz || GRAPHICS_SETTINGS.TARGET_FPS || DEFAULT_TARGET_FPS);
+    if (document.visibilityState !== 'visible' || !document.hasFocus()) return Promise.resolve(GRAPHICS_SETTINGS.TARGET_FPS || DEFAULT_TARGET_FPS);
+    detectInProgress = true;
+    return new Promise((resolve) => {
+        let lastTime;
+        let minDelta = Infinity;
+        let collected = 0;
+        function sample(t) {
+            if (lastTime !== undefined) {
+                const delta = t - lastTime;
+                if (collected >= warmup) {
+                    minDelta = Math.min(minDelta, delta);
+                    collected++;
+                    if (collected >= warmup + samples) {
+                        detectInProgress = false;
+                        const hz = Math.max(MIN_FPS_CAP, Math.min(360, Math.round(1000 / Math.max(minDelta, 0.0001))));
+                        bestDetectedHz = Math.max(bestDetectedHz, hz);
+                        GRAPHICS_SETTINGS.TARGET_FPS = bestDetectedHz;
+                        const label = document.getElementById('val-targetfps');
+                        if (label) label.innerText = `${bestDetectedHz} (auto)`;
+                        resolve(bestDetectedHz);
+                        return;
+                    }
+                } else {
+                    collected++;
+                }
+            }
+            lastTime = t;
+            requestAnimationFrame(sample);
+        }
+        requestAnimationFrame(sample);
+    });
+}
+
+function scheduleRefreshDetect(delay = 0) {
+    if (detectTimer) clearTimeout(detectTimer);
+    detectTimer = setTimeout(() => {
+        detectTimer = null;
+        detectDisplayRefreshRate();
+    }, delay);
+}
+
+// Initial detect and re-detect after focus/lock/visibility to catch cases where the tab was throttled.
+scheduleRefreshDetect(200);
+window.addEventListener('focus', () => scheduleRefreshDetect(200));
+window.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') scheduleRefreshDetect(200);
+});
+
+function getEffectiveTargetFps() {
+    return GRAPHICS_SETTINGS.TARGET_FPS || DEFAULT_TARGET_FPS;
+}
 
 function clampParticleHeight(pos) {
     const groundY = getTerrainHeight(pos.x, pos.z);
@@ -155,9 +250,9 @@ function initAirParticles() {
         particlePositions[base] = p.x;
         particlePositions[base + 1] = p.y;
         particlePositions[base + 2] = p.z;
-        particleVelocities[base] = (Math.random() - 0.5) * 0.2;
-        particleVelocities[base + 1] = (Math.random() - 0.5) * 0.2;
-        particleVelocities[base + 2] = (Math.random() - 0.5) * 0.2;
+        particleVelocities[base] = (Math.random() - 0.5) * 4.0;
+        particleVelocities[base + 1] = (Math.random() - 0.5) * 4.0;
+        particleVelocities[base + 2] = (Math.random() - 0.5) * 4.0;
     }
 
     particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
@@ -328,7 +423,11 @@ function updateAirParticles(dt) {
             const strength = (PARTICLE_REPEL_RADIUS - dist) / PARTICLE_REPEL_RADIUS;
             _tmpVel.addScaledVector(_tmpOffset, strength * PARTICLE_REPEL_STRENGTH * dt);
         } else {
-            _tmpVel.multiplyScalar(1 - Math.min(1, dt * 0.5)); // light damping
+            _tmpVel.multiplyScalar(1 - Math.min(1, dt * 0.05)); // very light damping
+            // Add random noise
+            _tmpVel.x += (Math.random() - 0.5) * 8.0 * dt;
+            _tmpVel.y += (Math.random() - 0.5) * 3.0 * dt;
+            _tmpVel.z += (Math.random() - 0.5) * 8.0 * dt;
         }
 
         _tmpVel.addScaledVector(PARTICLE_WIND, dt);
@@ -346,7 +445,7 @@ function updateAirParticles(dt) {
             const newPos = randomInSphere(PARTICLE_CLUSTER_SPREAD).add(clusterCenter);
             clampParticleHeight(newPos);
             _tmpVec.copy(newPos);
-            _tmpVel.set((Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3);
+            _tmpVel.set((Math.random() - 0.5) * 4.0, (Math.random() - 0.5) * 4.0, (Math.random() - 0.5) * 4.0);
         }
         clampParticleHeight(_tmpVec);
 
@@ -360,9 +459,26 @@ function updateAirParticles(dt) {
     }
     if (needsUpdate) particleGeometry.attributes.position.needsUpdate = true;
 }
-function animate() {
-    requestAnimationFrame(animate);
-    
+
+function animate(now) {
+    if (now === undefined) now = performance.now();
+    if (lastFrameTime === 0) lastFrameTime = now;
+
+    const targetFps = Math.max(MIN_FPS_CAP, getEffectiveTargetFps());
+    const minInterval = 1000 / targetFps;
+
+    const delta = now - lastFrameTime;
+    lastFrameTime = now;
+    frameAccumulator += delta;
+
+    // If we haven't reached the desired interval yet, skip rendering this tick but stay on rAF timing.
+    if (frameAccumulator + 0.25 < minInterval) {
+        requestAnimationFrame(animate);
+        return;
+    }
+    // Carry over any excess so we keep tight pacing without drifting downwards.
+    frameAccumulator = Math.max(0, frameAccumulator - minInterval);
+
     stats.begin();
 
     const dt = clock.getDelta();
@@ -384,6 +500,24 @@ function animate() {
     camera.position.lerpVectors(prevPlayerPos, playerPos, alpha);
 
     globalShaderUniforms.uBendCenter.value.copy(camera.position);
+    
+    _shadowAnchor.set(
+        Math.round(camera.position.x / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE,
+        Math.round(camera.position.y / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE,
+        Math.round(camera.position.z / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE
+    );
+    const shadowAnchorChanged = _shadowAnchor.distanceToSquared(_lastShadowAnchor) > (SHADOW_TEXEL_SIZE * SHADOW_TEXEL_SIZE * 0.25);
+    
+    const chunksUpdated = updateChunks(playerPos, scene);
+
+    if (shadowAnchorChanged || chunksUpdated) {
+        dirLight.position.copy(_shadowAnchor).add(lightOffset);
+        dirLight.target.position.copy(_shadowAnchor);
+        dirLight.target.updateMatrixWorld();
+        _lastShadowAnchor.copy(_shadowAnchor);
+        dirLight.shadow.needsUpdate = true;
+        renderer.shadowMap.needsUpdate = true;
+    }
 
     if (underwaterOverlay) {
         if (camera.position.y < -5.05) { 
@@ -398,8 +532,6 @@ function animate() {
             scene.fog.far = (CHUNK_SIZE * RENDER_DISTANCE) - 10;
         }
     }
-
-    updateChunks(playerPos, scene);
     updateClouds(dt, playerPos);
     updateUI(dt, clock, camera);
     updateAirParticles(dt);
@@ -417,11 +549,36 @@ function animate() {
     }
 
     const nowFrame = performance.now();
-    const frameDtMs = nowFrame - lastFrameTime;
-    lastFrameTime = nowFrame;
-    const instFps = 1000 / Math.max(frameDtMs, 0.0001);
-    smoothFps = smoothFps * 0.9 + instFps * 0.1;
-    fpsPanel.update(smoothFps, 200);
+    const frameDtMs = nowFrame - lastRenderTime;
+    lastRenderTime = nowFrame;
+
+    // Smooth the RFPS readout to avoid the high/low bounce from fractional frame pacing against the monitor refresh.
+    const rawRfps = 1000 / Math.max(frameDtMs, 0.0001);
+    const clampedRfps = Math.min(rawRfps, targetFps * 1.5);
+    if (smoothedRfps === 0) smoothedRfps = clampedRfps;
+    smoothedRfps += (clampedRfps - smoothedRfps) * RFPS_SMOOTH;
+    fpsPanel.update(smoothedRfps, targetFps * 2);
+
+    // Dynamic Resolution Logic
+    fpsCheckTimer += frameDtMs;
+    framesSinceLastCheck++;
+
+    if (fpsCheckTimer > FPS_CHECK_INTERVAL) {
+        const avgFps = (framesSinceLastCheck / fpsCheckTimer) * 1000;
+        // Cap dynamic resolution target at 144 to avoid downscaling for impossible targets (like 1000 FPS)
+        const dynResTarget = Math.min(144, getEffectiveTargetFps());
+        
+        if (avgFps < dynResTarget - 10 && currentPixelRatio > MIN_PIXEL_RATIO) {
+            currentPixelRatio = Math.max(MIN_PIXEL_RATIO, currentPixelRatio - 0.1);
+            renderer.setPixelRatio(currentPixelRatio);
+        } else if (avgFps > dynResTarget + 10 && currentPixelRatio < MAX_PIXEL_RATIO) {
+            currentPixelRatio = Math.min(MAX_PIXEL_RATIO, currentPixelRatio + 0.1);
+            renderer.setPixelRatio(currentPixelRatio);
+        }
+        
+        fpsCheckTimer = 0;
+        framesSinceLastCheck = 0;
+    }
 
     if (waterMesh) {
         const totalWidth = CHUNK_SIZE * (RENDER_DISTANCE * 2 + 2);
@@ -436,9 +593,11 @@ function animate() {
     renderer.render(scene, camera);
 
     stats.end();
+
+    requestAnimationFrame(animate);
 }
 
-animate();
+requestAnimationFrame(animate);
 
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;

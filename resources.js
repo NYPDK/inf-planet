@@ -18,31 +18,35 @@ export function initResources(scene, globalShaderUniforms) {
     grassTexture.colorSpace = THREE.SRGBColorSpace;
     const grassDryTexture = textureLoader.load('textures/tall-grass-dry-texture.png');
     grassDryTexture.colorSpace = THREE.SRGBColorSpace;
+    const GRASS_ALPHA_TEST = 0.5;
 
     const groundBump = generateNoiseTexture();
 
     materials.groundMat = new THREE.MeshStandardMaterial({ 
         vertexColors: true, 
-        roughness: 0.6, 
+        roughness: 1.0, 
+        metalness: 0.0,
         bumpMap: groundBump,
         bumpScale: BUMP_SCALE 
     });
 
     materials.trunkMat = new THREE.MeshStandardMaterial({ 
         color: 0x3d2817, 
-        roughness: 0.8 
+        roughness: 0.9,
+        metalness: 0.0
     });
 
     materials.treeMat = new THREE.MeshStandardMaterial({ 
         color: 0x1a330a, 
         flatShading: true, 
-        roughness: 0.5 
+        roughness: 0.8,
+        metalness: 0.0
     });
 
     materials.grassMat = new THREE.MeshStandardMaterial({
         map: grassTexture,
         transparent: true,
-        alphaTest: 0.5,
+        alphaTest: GRASS_ALPHA_TEST,
         side: THREE.DoubleSide,
         roughness: 0.8,
         metalness: 0.0
@@ -50,7 +54,7 @@ export function initResources(scene, globalShaderUniforms) {
     materials.grassDryMat = new THREE.MeshStandardMaterial({
         map: grassDryTexture,
         transparent: true,
-        alphaTest: 0.5,
+        alphaTest: GRASS_ALPHA_TEST,
         side: THREE.DoubleSide,
         roughness: 0.8,
         metalness: 0.0
@@ -89,6 +93,10 @@ export function initResources(scene, globalShaderUniforms) {
 
         vec4 mvPosition = viewMatrix * bentWorldPosition;
         gl_Position = projectionMatrix * mvPosition;
+
+        #if defined( DEPTH_PACKING ) && DEPTH_PACKING == 3201
+            vHighPrecisionZW = gl_Position.zw;
+        #endif
     `;
 
     function setupMaterial(material) {
@@ -123,6 +131,29 @@ export function initResources(scene, globalShaderUniforms) {
     setupMaterial(materials.treeMat);
     setupMaterial(materials.grassMat);
     setupMaterial(materials.grassDryMat);
+
+    // Shadow Depth Materials
+    materials.depthMat = new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        side: THREE.DoubleSide
+    });
+    setupMaterial(materials.depthMat);
+
+    materials.grassDepthMat = new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        map: grassTexture,
+        alphaTest: GRASS_ALPHA_TEST,
+        side: THREE.DoubleSide
+    });
+    setupMaterial(materials.grassDepthMat);
+
+    materials.grassDryDepthMat = new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        map: grassDryTexture,
+        alphaTest: GRASS_ALPHA_TEST,
+        side: THREE.DoubleSide
+    });
+    setupMaterial(materials.grassDryDepthMat);
 
     const waterGeo = new THREE.PlaneGeometry(
         CHUNK_SIZE * (RENDER_DISTANCE * 2 + 2), 

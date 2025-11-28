@@ -1,5 +1,6 @@
 import { getTerrainHeight, activeChunks } from './world.js';
 import { playerPos } from './physics.js';
+import { mapRenderer } from './MapRenderer.js';
 
 let canvas;
 let ctx;
@@ -98,60 +99,9 @@ export function updateLargeMap(playerPath, cameraQuaternion) {
     const cx = canvas.width / 2;
     const cy = canvas.height / 2;
 
-    const rangeX = (canvas.width / scale) / 2;
-    const rangeZ = (canvas.height / scale) / 2;
-    
-    const startX = Math.floor((viewX - rangeX) / 4) * 4;
-    const endX = Math.ceil((viewX + rangeX) / 4) * 4;
-    const startZ = Math.floor((viewZ - rangeZ) / 4) * 4;
-    const endZ = Math.ceil((viewZ + rangeZ) / 4) * 4;
-
-    let step = 4;
-    if (scale < 2.0) step = 8;
-    if (scale < 1.0) step = 16;
-    if (scale < 0.5) step = 32;
-
-    const alignedStartX = Math.floor(startX / step) * step;
-    const alignedEndX = Math.ceil(endX / step) * step;
-    const alignedStartZ = Math.floor(startZ / step) * step;
-    const alignedEndZ = Math.ceil(endZ / step) * step;
-
-    for (let wz = alignedStartZ; wz <= alignedEndZ; wz += step) {
-        for (let wx = alignedStartX; wx <= alignedEndX; wx += step) {
-            const h = getTerrainHeight(wx, wz);
-
-            let color = '#4a6b36'; 
-            if (h < -6) color = '#1e3f5a'; 
-            else if (h < -5) color = '#3b7d9c'; 
-            else if (h < -4) color = '#d2b48c'; 
-            else if (h > 5) color = '#1a330a'; 
-
-            const screenX = cx + (wx - viewX) * scale;
-            const screenY = cy + (wz - viewZ) * scale;
-            const screenSize = step * scale;
-
-            if (screenX + screenSize < -10 || screenX > canvas.width + 10 || 
-                screenY + screenSize < -10 || screenY > canvas.height + 10) continue;
-
-            ctx.fillStyle = color;
-            ctx.fillRect(screenX, screenY, screenSize + 0.5, screenSize + 0.5); 
-        }
-    }
-
-    ctx.fillStyle = '#0d1a05'; 
-    for (const chunk of activeChunks.values()) {
-        if (chunk.userData && chunk.userData.trees) {
-            for (const tree of chunk.userData.trees) {
-                const dx = (tree.x - viewX) * scale;
-                const dy = (tree.z - viewZ) * scale;
-                if (Math.abs(dx) < cx + 10 && Math.abs(dy) < cy + 10) {
-                    ctx.beginPath();
-                    ctx.arc(cx + dx, cy + dy, 2 * (scale / 3), 0, Math.PI * 2);
-                    ctx.fill();
-                }
-            }
-        }
-    }
+    // Use MapRenderer for terrain and trees
+    mapRenderer.draw(ctx, viewX, viewZ, scale, canvas.width, canvas.height);
+    mapRenderer.drawTrees(ctx, viewX, viewZ, scale, canvas.width, canvas.height);
 
     if (playerPath.length > 1) {
         ctx.strokeStyle = '#ffff00';

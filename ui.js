@@ -1,8 +1,9 @@
-import { physicsParams, playerPos } from './physics.js';
-import { DEFAULTS, CHUNK_SIZE } from './config.js';
+import { physicsParams, playerPos, velocity } from './physics.js';
+import { DEFAULTS, CHUNK_SIZE, GRAPHICS_SETTINGS } from './config.js';
 import { activeChunks, getTerrainHeight } from './world.js';
 import { initLargeMap, toggleLargeMap, updateLargeMapWithCamera } from './LargeMap.js';
 import { keys } from './input.js';
+import { mapRenderer } from './MapRenderer.js';
 import * as THREE from 'three';
 
 let minimapCtx;
@@ -14,6 +15,11 @@ const TRAIL_DURATION = 300.0;
 let playerPath = [];
 let lastMapKey = false;
 
+// Throttled HUD updates
+let hudTimer = 0;
+const HUD_INTERVAL = 0.1;
+let velEl, posEl;
+
 const _forward = new THREE.Vector3();
 const _zAxis = new THREE.Vector3(0, 0, -1);
 
@@ -21,11 +27,15 @@ export function initUI(controls) {
     const instructions = document.getElementById('instructions');
     const crosshair = document.getElementById('crosshair');
     const speedHud = document.getElementById('speedHud');
+    velEl = document.getElementById('vel');
+    posEl = document.getElementById('pos');
+
     const sensSlider = document.getElementById('sensSlider');
     const speedSlider = document.getElementById('speedSlider');
     const jumpSlider = document.getElementById('jumpSlider');
     const gravitySlider = document.getElementById('gravitySlider');
     const airMaxSlider = document.getElementById('airMaxSlider');
+    const targetFpsInput = document.getElementById('targetFpsInput');
     const resetBtn = document.getElementById('resetBtn');
     const settingsMenu = document.getElementById('settings-menu');
 
@@ -33,6 +43,8 @@ export function initUI(controls) {
     minimapCtx = minimapCanvas.getContext('2d');
 
     initLargeMap(controls);
+    
+    // Set initial state
 
     instructions.addEventListener('click', () => controls.lock());
 
@@ -101,7 +113,6 @@ export function initUI(controls) {
         gravitySlider.value = physicsParams.GRAVITY;
         sensSlider.value = controls.pointerSpeed;
         airMaxSlider.value = physicsParams.MAX_AIR_SPEED;
-
         updateDisplay('val-speed', physicsParams.MOVE_SPEED);
         updateDisplay('val-jump', physicsParams.JUMP_FORCE);
         updateDisplay('val-grav', physicsParams.GRAVITY);
@@ -114,12 +125,19 @@ export function initUI(controls) {
     gravitySlider.value = physicsParams.GRAVITY;
     sensSlider.value = DEFAULTS.SENSITIVITY;
     airMaxSlider.value = physicsParams.MAX_AIR_SPEED;
+    if (targetFpsInput) {
+        targetFpsInput.disabled = true;
+        targetFpsInput.style.display = 'none';
+        const targetLabel = document.getElementById('val-targetfps');
+        if (targetLabel) targetLabel.innerText = `${GRAPHICS_SETTINGS.TARGET_FPS.toFixed(0)} (auto)`;
+    }
 
     updateDisplay('val-speed', physicsParams.MOVE_SPEED);
     updateDisplay('val-jump', physicsParams.JUMP_FORCE);
     updateDisplay('val-grav', physicsParams.GRAVITY);
     updateDisplay('val-sens', DEFAULTS.SENSITIVITY.toFixed(1));
     updateDisplay('val-airmax', physicsParams.MAX_AIR_SPEED.toFixed(1));
+    updateDisplay('val-targetfps', `${GRAPHICS_SETTINGS.TARGET_FPS.toFixed(0)} (auto)`);
 }
 
 export function updateUI(dt, clock, camera) {
@@ -127,6 +145,18 @@ export function updateUI(dt, clock, camera) {
         toggleLargeMap();
     }
     lastMapKey = keys.map;
+
+    hudTimer += dt;
+    if (hudTimer > HUD_INTERVAL) {
+        hudTimer = 0;
+        if (velEl) {
+            const hVel = Math.sqrt(velocity.x**2 + velocity.z**2);
+            velEl.innerText = hVel.toFixed(0);
+        }
+        if (posEl) {
+            posEl.innerText = `${Math.round(playerPos.x)}, ${Math.round(playerPos.z)}`;
+        }
+    }
 
     minimapTimer += dt;
     if (minimapTimer > MINIMAP_INTERVAL) {
@@ -140,41 +170,37 @@ function drawMinimap(now, camera) {
     const cx = minimapCanvas.width / 2;
     const cy = minimapCanvas.height / 2;
 
-    const step = 4; 
-    for (let py = 0; py < minimapCanvas.height; py += step) {
-        for (let px = 0; px < minimapCanvas.width; px += step) {
-            const wx = playerPos.x + (px - cx) / MINIMAP_SCALE;
-            const wz = playerPos.z + (py - cy) / MINIMAP_SCALE;
-            const h = getTerrainHeight(wx, wz);
-            
-            let color = '#4a6b36'; 
-            if (h < -6) color = '#1e3f5a'; 
-            else if (h < -5) color = '#3b7d9c'; 
-            else if (h < -4) color = '#d2b48c'; 
-            else if (h > 5) color = '#1a330a'; 
+    // Use MapRenderer
+    // Clear first? draw draws over, but maybe not fully if zoomed out?
+    // But for minimap we fill the whole canvas usually.
+    // Let's allow mapRenderer to handle drawing.
+    // Note: LargeMap was clearing with rgba(0,0,0,0.85), minimap usually opaque or specific background?
+    // LargeMap logic:
+    // ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    // ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Minimap previously filled rects, effectively opaque.
+    // So we don't strictly need to clear if we cover everything, but good practice.
+    minimapCtx.clearRect(0, 0, minimapCanvas.width, minimapCanvas.height);
 
-            minimapCtx.fillStyle = color;
-            minimapCtx.fillRect(px, py, step, step);
-        }
-    }
+    mapRenderer.draw(minimapCtx, playerPos.x, playerPos.z, MINIMAP_SCALE, minimapCanvas.width, minimapCanvas.height);
+    mapRenderer.drawTrees(minimapCtx, playerPos.x, playerPos.z, MINIMAP_SCALE, minimapCanvas.width, minimapCanvas.height);
 
-    minimapCtx.fillStyle = '#0d1a05'; 
-    for (const chunk of activeChunks.values()) {
-        if (chunk.userData && chunk.userData.trees) {
-            for (const tree of chunk.userData.trees) {
-                const dx = (tree.x - playerPos.x) * MINIMAP_SCALE;
-                const dy = (tree.z - playerPos.z) * MINIMAP_SCALE;
-                if (Math.abs(dx) < cx && Math.abs(dy) < cy) {
-                    minimapCtx.beginPath();
-                    minimapCtx.arc(cx + dx, cy + dy, 2, 0, Math.PI * 2);
-                    minimapCtx.fill();
-                }
-            }
-        }
-    }
 
     playerPath.push({ x: playerPos.x, z: playerPos.z, t: now });
-    playerPath = playerPath.filter(p => now - p.t < TRAIL_DURATION);
+    
+    // Remove old points from the start (efficient since sorted by time)
+    let removeCount = 0;
+    for (const p of playerPath) {
+        if (now - p.t >= TRAIL_DURATION) {
+            removeCount++;
+        } else {
+            break;
+        }
+    }
+    if (removeCount > 0) {
+        playerPath.splice(0, removeCount);
+    }
 
     minimapCtx.strokeStyle = '#ffff00';
     minimapCtx.lineWidth = 2;

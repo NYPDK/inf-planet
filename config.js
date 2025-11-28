@@ -10,10 +10,14 @@ export const CURVATURE_STRENGTH = 0.0025;
 export const DEFAULTS = {
     MOVE_SPEED: 7.0,
     SPRINT_SPEED: 14.0,
-    JUMP_FORCE: 22.0,
-    GRAVITY: 70.0,
+    JUMP_FORCE: 15.0,
+    GRAVITY: 40.0,
     SENSITIVITY: 1.0,
     MAX_AIR_SPEED: 3.5
+};
+
+export const GRAPHICS_SETTINGS = {
+    TARGET_FPS: 60.0
 };
 
 export const PHYSICS_CONSTANTS = {

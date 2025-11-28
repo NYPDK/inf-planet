@@ -6,6 +6,12 @@ import { materials, geometries } from './resources.js';
 export const activeChunks = new Map();
 const noise2D = createNoise2D();
 const dummy = new THREE.Object3D();
+const buildQueue = [];
+const buildQueueSet = new Set();
+const removeQueue = [];
+const removeQueueSet = new Set();
+const MAX_CHUNK_BUILDS_PER_FRAME = 1;
+const MAX_CHUNK_REMOVES_PER_FRAME = 1;
 
 export function getTerrainHeight(x, z) {
     let y = 0;
@@ -57,12 +63,35 @@ function createChunk(cx, cz, scene) {
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geometry.computeVertexNormals();
     const terrain = new THREE.Mesh(geometry, materials.groundMat);
+    terrain.receiveShadow = true;
+    terrain.castShadow = true; // Terrain self-shadowing
+    terrain.customDepthMaterial = materials.depthMat;
+    terrain.frustumCulled = false;
     group.add(terrain);
 
     const trunkMesh = new THREE.InstancedMesh(geometries.trunkGeo, materials.trunkMat, TREE_COUNT);
+    trunkMesh.castShadow = true;
+    trunkMesh.receiveShadow = true;
+    trunkMesh.customDepthMaterial = materials.depthMat;
+    trunkMesh.frustumCulled = false;
+
     const leavesMesh = new THREE.InstancedMesh(geometries.leavesGeo, materials.treeMat, TREE_COUNT);
+    leavesMesh.castShadow = true;
+    leavesMesh.receiveShadow = true;
+    leavesMesh.customDepthMaterial = materials.depthMat;
+    leavesMesh.frustumCulled = false;
+
     const grassMesh = new THREE.InstancedMesh(geometries.grassGeo, materials.grassMat, GRASS_COUNT);
+    grassMesh.castShadow = true;
+    grassMesh.receiveShadow = true;
+    grassMesh.customDepthMaterial = materials.grassDepthMat;
+    grassMesh.frustumCulled = false;
+
     const grassDryMesh = new THREE.InstancedMesh(geometries.grassGeo, materials.grassDryMat, GRASS_COUNT);
+    grassDryMesh.castShadow = true;
+    grassDryMesh.receiveShadow = true;
+    grassDryMesh.customDepthMaterial = materials.grassDryDepthMat;
+    grassDryMesh.frustumCulled = false;
     
     const existingTrees = [];
 
@@ -146,15 +175,19 @@ function createChunk(cx, cz, scene) {
     if (treeIdx > 0) {
         trunkMesh.count = treeIdx;
         leavesMesh.count = treeIdx;
+        trunkMesh.instanceMatrix.needsUpdate = true;
+        leavesMesh.instanceMatrix.needsUpdate = true;
         group.add(trunkMesh);
         group.add(leavesMesh);
     }
     if (grassIdx > 0) {
         grassMesh.count = grassIdx;
+        grassMesh.instanceMatrix.needsUpdate = true;
         group.add(grassMesh);
     }
     if (grassDryIdx > 0) {
         grassDryMesh.count = grassDryIdx;
+        grassDryMesh.instanceMatrix.needsUpdate = true;
         group.add(grassDryMesh);
     }
 
@@ -164,28 +197,84 @@ function createChunk(cx, cz, scene) {
     return group;
 }
 
+const _lastUpdatePos = new THREE.Vector3(Infinity, Infinity, Infinity);
+
 export function updateChunks(playerPos, scene) {
+    // Always process queues to ensure smooth loading even if player stops
+    if (buildQueue.length > 1) {
+        buildQueue.sort((a, b) => a.dist2 - b.dist2);
+    }
+    let built = 0;
+    while (built < MAX_CHUNK_BUILDS_PER_FRAME && buildQueue.length > 0) {
+        const job = buildQueue.shift();
+        buildQueueSet.delete(job.key);
+        if (activeChunks.has(job.key)) continue;
+        activeChunks.set(job.key, createChunk(job.cx, job.cz, scene));
+        built++;
+    }
+
+    if (removeQueue.length > 1) {
+        removeQueue.sort((a, b) => b.dist2 - a.dist2);
+    }
+    let removed = 0;
+    while (removed < MAX_CHUNK_REMOVES_PER_FRAME && removeQueue.length > 0) {
+        const job = removeQueue.shift();
+        removeQueueSet.delete(job.key);
+        const mesh = job.mesh || activeChunks.get(job.key);
+        if (!mesh) continue;
+        scene.remove(mesh);
+        mesh.traverse((obj) => {
+            if (obj.geometry) obj.geometry.dispose();
+        });
+        activeChunks.delete(job.key);
+        removed++;
+    }
+
+    // Only check for new chunks if player has moved enough
+    if (playerPos.distanceToSquared(_lastUpdatePos) < 16.0) { // 4 units distance
+        return built > 0 || removed > 0;
+    }
+    _lastUpdatePos.copy(playerPos);
+
     const currentChunkX = Math.floor(playerPos.x / CHUNK_SIZE);
     const currentChunkZ = Math.floor(playerPos.z / CHUNK_SIZE);
+    const neededKeys = new Set();
 
     for (let x = -RENDER_DISTANCE; x <= RENDER_DISTANCE; x++) {
         for (let z = -RENDER_DISTANCE; z <= RENDER_DISTANCE; z++) {
-            const key = `${currentChunkX + x},${currentChunkZ + z}`;
-            if (!activeChunks.has(key)) {
-                activeChunks.set(key, createChunk(currentChunkX + x, currentChunkZ + z, scene));
+            const cx = currentChunkX + x;
+            const cz = currentChunkZ + z;
+            const key = `${cx},${cz}`;
+            neededKeys.add(key);
+
+            if (!activeChunks.has(key) && !buildQueueSet.has(key)) {
+                const dist2 = x * x + z * z;
+                buildQueue.push({ key, cx, cz, dist2 });
+                buildQueueSet.add(key);
+            }
+        }
+    }
+
+    if (removeQueue.length) {
+        for (let i = removeQueue.length - 1; i >= 0; i--) {
+            if (neededKeys.has(removeQueue[i].key)) {
+                removeQueueSet.delete(removeQueue[i].key);
+                removeQueue.splice(i, 1);
             }
         }
     }
 
     for (const [key, mesh] of activeChunks) {
+        if (neededKeys.has(key) || removeQueueSet.has(key)) continue;
         const [kx, kz] = key.split(',').map(Number);
-        const dist = Math.sqrt((kx - currentChunkX)**2 + (kz - currentChunkZ)**2);
-        if (dist > RENDER_DISTANCE + 1) {
-            scene.remove(mesh);
-            mesh.traverse((obj) => {
-                if (obj.geometry) obj.geometry.dispose();
-            });
-            activeChunks.delete(key);
+        const dx = kx - currentChunkX;
+        const dz = kz - currentChunkZ;
+        const dist2 = dx * dx + dz * dz;
+        if (dist2 > (RENDER_DISTANCE + 1) * (RENDER_DISTANCE + 1)) {
+            removeQueue.push({ key, mesh, dist2 });
+            removeQueueSet.add(key);
         }
     }
+    
+    return built > 0 || removed > 0;
 }

@@ -50,10 +50,6 @@ export function updatePhysics(dt, camera, controls) {
         playerPos.addScaledVector(flyVelocity, dt);
         onGround = false;
         velocity.set(0, 0, 0);
-
-        const hVel = Math.sqrt(flyVelocity.x**2 + flyVelocity.z**2);
-        document.getElementById('vel').innerText = hVel.toFixed(0);
-        document.getElementById('pos').innerText = `${Math.round(playerPos.x)}, ${Math.round(playerPos.z)}`;
         return;
     }
 
@@ -122,10 +118,6 @@ export function updatePhysics(dt, camera, controls) {
         playerPos.set(0, 20, 0);
         velocity.set(0,0,0);
     }
-
-    const hVel = Math.sqrt(velocity.x**2 + velocity.z**2);
-    document.getElementById('vel').innerText = hVel.toFixed(0);
-    document.getElementById('pos').innerText = `${Math.round(playerPos.x)}, ${Math.round(playerPos.z)}`;
 }
 
 function getNearbyTrees() {
