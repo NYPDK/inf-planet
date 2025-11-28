@@ -124,6 +124,7 @@ export function initUI(controls) {
     jumpSlider.value = physicsParams.JUMP_FORCE;
     gravitySlider.value = physicsParams.GRAVITY;
     sensSlider.value = DEFAULTS.SENSITIVITY;
+    controls.pointerSpeed = DEFAULTS.SENSITIVITY;
     airMaxSlider.value = physicsParams.MAX_AIR_SPEED;
     if (targetFpsInput) {
         targetFpsInput.disabled = true;

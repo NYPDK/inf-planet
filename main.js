@@ -1,7 +1,6 @@
 import * as THREE from 'three';
-import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import Stats from 'three/addons/libs/stats.module.js';
-import { initInput } from './input.js';
+import { initInput, SmoothPointerLockControls } from './input.js';
 import { initResources, waterMesh } from './resources.js';
 import { initClouds, updateClouds } from './clouds.js';
 import { updateChunks, getTerrainHeight, activeChunks } from './world.js';
@@ -132,7 +131,7 @@ const _globalWind = new THREE.Vector3(0.25, 0.02, 0.25);
 const _windTarget = new THREE.Vector3(0.25, 0.02, 0.25);
 let windTimer = PARTICLE_WIND_CHANGE_INTERVAL;
 
-const controls = new PointerLockControls(camera, document.body);
+const controls = new SmoothPointerLockControls(camera, document.body);
 controls.addEventListener('lock', () => scheduleRefreshDetect(200));
 
 initInput();
@@ -674,6 +673,7 @@ function animate(now) {
     }
     updateClouds(dt, playerPos);
     updateUI(dt, clock, camera);
+    controls.update(dt);
     updateAirParticles(dt);
     if (particleMaterialUniforms) {
         particleMaterialUniforms.uWaterLevel.value = waterMesh ? waterMesh.position.y : -5.0;
