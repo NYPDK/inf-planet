@@ -14,6 +14,24 @@ const MAX_CHUNK_BUILDS_PER_FRAME = 1;
 const MAX_CHUNK_REMOVES_PER_FRAME = 1;
 const SMOOTH_SAMPLE_DIST = 1.5;
 const TERRAIN_SEGMENTS = 32;
+const RNG_SALT_TREES = 1013904223;
+const RNG_SALT_GRASS = 277803737;
+
+function mulberry32(seed) {
+    return function () {
+        seed |= 0;
+        seed = seed + 0x6D2B79F5 | 0;
+        let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+}
+
+function seedFromCoords(cx, cz, salt = 0) {
+    let h = cx * 374761393 + cz * 668265263 + salt * 700001;
+    h = (h ^ (h >> 13)) >>> 0;
+    return h;
+}
 
 function rawTerrainHeight(x, z) {
     let y = 0;
@@ -36,6 +54,9 @@ export function getTerrainHeight(x, z) {
 }
 
 function createChunk(cx, cz, scene) {
+    const randTree = mulberry32(seedFromCoords(cx, cz, RNG_SALT_TREES));
+    const randGrass = mulberry32(seedFromCoords(cx, cz, RNG_SALT_GRASS));
+
     const group = new THREE.Group();
     
     const geometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS);
@@ -116,8 +137,8 @@ function createChunk(cx, cz, scene) {
     for (let i = 0; i < TREE_COUNT * 3; i++) { 
         if (treeIdx >= TREE_COUNT) break;
 
-        const rx = (Math.random() - 0.5) * CHUNK_SIZE;
-        const rz = (Math.random() - 0.5) * CHUNK_SIZE;
+        const rx = (randTree() - 0.5) * CHUNK_SIZE;
+        const rz = (randTree() - 0.5) * CHUNK_SIZE;
         const wx = cx * CHUNK_SIZE + rx;
         const wz = cz * CHUNK_SIZE + rz;
         const h = getTerrainHeight(wx, wz);
@@ -142,10 +163,10 @@ function createChunk(cx, cz, scene) {
 
         if (h > -4 && slope < 1.5) {
             dummy.position.set(rx, h - 0.2, rz); 
-            const scale = 0.8 + Math.random() * 0.6;
-            const heightScale = scale * (0.8 + Math.random()*0.4);
+            const scale = 0.8 + randTree() * 0.6;
+            const heightScale = scale * (0.8 + randTree() * 0.4);
             dummy.scale.set(scale, heightScale, scale);
-            dummy.rotation.set(0, Math.random() * Math.PI, 0);
+            dummy.rotation.set(0, randTree() * Math.PI, 0);
             dummy.updateMatrix();
             
             trunkMesh.setMatrixAt(treeIdx, dummy.matrix);
@@ -163,8 +184,8 @@ function createChunk(cx, cz, scene) {
     let grassIdx = 0;
     let grassDryIdx = 0;
     for (let i = 0; i < GRASS_COUNT; i++) {
-        const rx = (Math.random() - 0.5) * CHUNK_SIZE;
-        const rz = (Math.random() - 0.5) * CHUNK_SIZE;
+        const rx = (randGrass() - 0.5) * CHUNK_SIZE;
+        const rz = (randGrass() - 0.5) * CHUNK_SIZE;
         const wx = cx * CHUNK_SIZE + rx;
         const wz = cz * CHUNK_SIZE + rz;
         const h = getTerrainHeight(wx, wz);
@@ -173,9 +194,9 @@ function createChunk(cx, cz, scene) {
             const slope = Math.abs(getTerrainHeight(wx + 0.5, wz) - h) + Math.abs(getTerrainHeight(wx, wz + 0.5) - h);
             const embed = 0.05 + Math.min(0.18, slope * 0.08);
             dummy.position.set(rx, h - embed, rz);
-            const s = 0.8 + Math.random() * 0.5;
+            const s = 0.8 + randGrass() * 0.5;
             dummy.scale.set(s, s, s);
-            dummy.rotation.set(0, Math.random() * Math.PI, 0);
+            dummy.rotation.set(0, randGrass() * Math.PI, 0);
             dummy.updateMatrix();
             grassMesh.setMatrixAt(grassIdx, dummy.matrix);
             grassIdx++;
@@ -184,9 +205,9 @@ function createChunk(cx, cz, scene) {
             const slope = Math.abs(getTerrainHeight(wx + 0.5, wz) - h) + Math.abs(getTerrainHeight(wx, wz + 0.5) - h);
             const embed = 0.05 + Math.min(0.18, slope * 0.08);
             dummy.position.set(rx, h - embed, rz);
-            const s = 0.8 + Math.random() * 0.5;
+            const s = 0.8 + randGrass() * 0.5;
             dummy.scale.set(s, s, s);
-            dummy.rotation.set(0, Math.random() * Math.PI, 0);
+            dummy.rotation.set(0, randGrass() * Math.PI, 0);
             dummy.updateMatrix();
             grassDryMesh.setMatrixAt(grassDryIdx, dummy.matrix);
             grassDryIdx++;
