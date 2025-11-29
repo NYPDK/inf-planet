@@ -13,6 +13,7 @@ const removeQueueSet = new Set();
 const MAX_CHUNK_BUILDS_PER_FRAME = 1;
 const MAX_CHUNK_REMOVES_PER_FRAME = 1;
 const SMOOTH_SAMPLE_DIST = 1.5;
+const TERRAIN_SEGMENTS = 32;
 
 function rawTerrainHeight(x, z) {
     let y = 0;
@@ -37,7 +38,7 @@ export function getTerrainHeight(x, z) {
 function createChunk(cx, cz, scene) {
     const group = new THREE.Group();
     
-    const geometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, 32, 32);
+    const geometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS);
     geometry.rotateX(-Math.PI / 2);
     const posAttr = geometry.attributes.position;
     
@@ -47,12 +48,16 @@ function createChunk(cx, cz, scene) {
     const c2 = new THREE.Color(0x4a6b36);
     const c3 = new THREE.Color(0x1a330a);
     const c4 = new THREE.Color(0x8a8a8a);
+    let minY = Infinity;
+    let maxY = -Infinity;
 
     for (let i = 0; i < posAttr.count; i++) {
         const x = posAttr.getX(i) + cx * CHUNK_SIZE;
         const z = posAttr.getZ(i) + cz * CHUNK_SIZE;
         const h = getTerrainHeight(x, z);
         posAttr.setY(i, h);
+        if (h < minY) minY = h;
+        if (h > maxY) maxY = h;
 
         if (h < -4.0) {
              color.copy(c1);
@@ -71,6 +76,7 @@ function createChunk(cx, cz, scene) {
     
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
     const terrain = new THREE.Mesh(geometry, materials.groundMat);
     terrain.receiveShadow = true;
     terrain.castShadow = true; // Terrain self-shadowing
@@ -78,25 +84,27 @@ function createChunk(cx, cz, scene) {
     terrain.frustumCulled = false;
     group.add(terrain);
 
-    const trunkMesh = new THREE.InstancedMesh(geometries.trunkGeo, materials.trunkMat, TREE_COUNT);
+    const treeBudget = TREE_COUNT;
+    const trunkMesh = new THREE.InstancedMesh(geometries.trunkGeo, materials.trunkMat, treeBudget);
     trunkMesh.castShadow = true;
     trunkMesh.receiveShadow = true;
     trunkMesh.customDepthMaterial = materials.depthMat;
     trunkMesh.frustumCulled = false;
 
-    const leavesMesh = new THREE.InstancedMesh(geometries.leavesGeo, materials.treeMat, TREE_COUNT);
+    const leavesMesh = new THREE.InstancedMesh(geometries.leavesGeo, materials.treeMat, treeBudget);
     leavesMesh.castShadow = true;
     leavesMesh.receiveShadow = true;
     leavesMesh.customDepthMaterial = materials.depthMat;
     leavesMesh.frustumCulled = false;
 
-    const grassMesh = new THREE.InstancedMesh(geometries.grassGeo, materials.grassMat, GRASS_COUNT);
+    const grassBudget = GRASS_COUNT;
+    const grassMesh = new THREE.InstancedMesh(geometries.grassGeo, materials.grassMat, grassBudget);
     grassMesh.castShadow = true;
     grassMesh.receiveShadow = true;
     grassMesh.customDepthMaterial = materials.grassDepthMat;
     grassMesh.frustumCulled = false;
 
-    const grassDryMesh = new THREE.InstancedMesh(geometries.grassGeo, materials.grassDryMat, GRASS_COUNT);
+    const grassDryMesh = new THREE.InstancedMesh(geometries.grassGeo, materials.grassDryMat, grassBudget);
     grassDryMesh.castShadow = true;
     grassDryMesh.receiveShadow = true;
     grassDryMesh.customDepthMaterial = materials.grassDryDepthMat;
@@ -205,6 +213,12 @@ function createChunk(cx, cz, scene) {
     }
 
     group.userData = { trees: existingTrees };
+    const half = CHUNK_SIZE * 0.5;
+    const bounds = new THREE.Box3(
+        new THREE.Vector3(cx * CHUNK_SIZE - half, minY - 2, cz * CHUNK_SIZE - half),
+        new THREE.Vector3(cx * CHUNK_SIZE + half, maxY + 2, cz * CHUNK_SIZE + half)
+    );
+    group.userData.bounds = bounds;
     group.position.set(cx * CHUNK_SIZE, 0, cz * CHUNK_SIZE);
     scene.add(group);
     return group;
@@ -278,7 +292,7 @@ export function updateChunks(playerPos, scene) {
     }
 
     for (const [key, mesh] of activeChunks) {
-        if (neededKeys.has(key) || removeQueueSet.has(key)) continue;
+        if (removeQueueSet.has(key)) continue;
         const [kx, kz] = key.split(',').map(Number);
         const dx = kx - currentChunkX;
         const dz = kz - currentChunkZ;

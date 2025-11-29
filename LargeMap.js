@@ -186,3 +186,7 @@ export function updateLargeMapWithCamera(playerPath, camera) {
 }
 
 import * as THREE from 'three';
+
+export function isLargeMapVisible() {
+    return isVisible;
+}

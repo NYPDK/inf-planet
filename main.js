@@ -6,6 +6,7 @@ import { initClouds, updateClouds } from './clouds.js';
 import { updateChunks, getTerrainHeight, activeChunks } from './world.js';
 import { updatePhysics, playerPos } from './physics.js';
 import { initUI, updateUI } from './ui.js';
+import { isLargeMapVisible } from './LargeMap.js';
 import { CHUNK_SIZE, RENDER_DISTANCE, CURVATURE_STRENGTH, DEFAULTS, GRAPHICS_SETTINGS } from './config.js';
 
 const scene = new THREE.Scene();
@@ -40,6 +41,8 @@ const UPSCALE_STEP = 0.05;
 const DYNRES_MIN_INTERVAL = 1500; // ms
 let lastDynResChange = 0;
 const MAX_FRAME_DELTA = 0.05; // clamp large frame gaps to avoid jittery input/physics
+const DEFAULT_TARGET_FPS = 240;
+const MAP_RESUME_DELAY_MS = 1000;
 
 const globalShaderUniforms = {
     uCurvature: { value: CURVATURE_STRENGTH },
@@ -140,10 +143,10 @@ initClouds(scene, globalShaderUniforms);
 initUI(controls);
 initAirParticles();
 
-const clock = new THREE.Clock();
 const TIME_STEP = 1 / 120; // run sim at high tick rate for smooth motion on high refresh
 const MAX_PHYSICS_STEPS = 4; // avoid spiraling when frame time spikes
 let physicsAccumulator = 0;
+const simClock = new THREE.Clock();
 const prevPlayerPos = new THREE.Vector3().copy(playerPos);
 const underwaterOverlay = document.getElementById('underwater-overlay');
 const stats = new Stats();
@@ -172,8 +175,21 @@ let bestDetectedHz = 0;
 let detectInProgress = false;
 let detectTimer = null;
 const MIN_FPS_CAP = 30;
-const DEFAULT_TARGET_FPS = 240;
 const RFPS_SMOOTH = 0.25;
+let mapCooldownMs = 0;
+let lastMapVisible = false;
+const _frustum = new THREE.Frustum();
+const _projScreen = new THREE.Matrix4();
+
+function updateChunkVisibility(cam) {
+    if (!cam) return;
+    _projScreen.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_projScreen);
+    for (const [, chunk] of activeChunks) {
+        const bounds = chunk.userData?.bounds;
+        chunk.visible = bounds ? _frustum.intersectsBox(bounds) : true;
+    }
+}
 
 function detectDisplayRefreshRate(samples = 180, warmup = 30) {
     if (detectInProgress) return Promise.resolve(bestDetectedHz || GRAPHICS_SETTINGS.TARGET_FPS || DEFAULT_TARGET_FPS);
@@ -613,14 +629,8 @@ function updateAirParticles(dt) {
     if (needsUpdate) particleGeometry.attributes.position.needsUpdate = true;
 }
 
-function animate(now) {
-    if (now === undefined) now = performance.now();
-
-    const targetFps = Math.max(MIN_FPS_CAP, getEffectiveTargetFps());
-
-    stats.begin();
-
-    const dt = Math.min(clock.getDelta(), MAX_FRAME_DELTA);
+function simulationLoop() {
+    const dt = Math.min(simClock.getDelta(), MAX_FRAME_DELTA);
     physicsAccumulator += dt;
     let stepsThisFrame = 0;
 
@@ -635,19 +645,14 @@ function animate(now) {
         }
     }
 
-    const alpha = physicsAccumulator / TIME_STEP;
-    camera.position.lerpVectors(prevPlayerPos, playerPos, alpha);
+    const chunksUpdated = updateChunks(playerPos, scene);
 
-    globalShaderUniforms.uBendCenter.value.copy(camera.position);
-    
     _shadowAnchor.set(
-        Math.round(camera.position.x / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE,
-        Math.round(camera.position.y / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE,
-        Math.round(camera.position.z / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE
+        Math.round(playerPos.x / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE,
+        Math.round(playerPos.y / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE,
+        Math.round(playerPos.z / SHADOW_TEXEL_SIZE) * SHADOW_TEXEL_SIZE
     );
     const shadowAnchorChanged = _shadowAnchor.distanceToSquared(_lastShadowAnchor) > (SHADOW_TEXEL_SIZE * SHADOW_TEXEL_SIZE * 0.25);
-    
-    const chunksUpdated = updateChunks(playerPos, scene);
 
     if (shadowAnchorChanged || chunksUpdated) {
         dirLight.position.copy(_shadowAnchor).add(lightOffset);
@@ -658,21 +663,8 @@ function animate(now) {
         renderer.shadowMap.needsUpdate = true;
     }
 
-    if (underwaterOverlay) {
-        if (camera.position.y < -5.05) { 
-            underwaterOverlay.style.display = 'block';
-            scene.fog.color.setHex(0x001e32); 
-            scene.fog.near = 1;
-            scene.fog.far = 30;
-        } else {
-            underwaterOverlay.style.display = 'none';
-            scene.fog.color.setHex(skyColor); 
-            scene.fog.near = 20;
-            scene.fog.far = (CHUNK_SIZE * RENDER_DISTANCE) - 10;
-        }
-    }
     updateClouds(dt, playerPos);
-    updateUI(dt, clock, camera);
+    updateUI(dt, simClock, camera);
     controls.update(dt);
     updateAirParticles(dt);
     if (particleMaterialUniforms) {
@@ -688,56 +680,92 @@ function animate(now) {
         tickTimer = 0;
     }
 
+    requestAnimationFrame(simulationLoop);
+}
+
+function renderLoop(now) {
+    if (now === undefined) now = performance.now();
+
+    const targetFps = Math.max(MIN_FPS_CAP, getEffectiveTargetFps());
+    const displayTarget = targetFps; // desired performance target only
+    stats.begin();
+
+    const alpha = physicsAccumulator / TIME_STEP;
+    camera.position.lerpVectors(prevPlayerPos, playerPos, Math.min(1, alpha));
+
+    globalShaderUniforms.uBendCenter.value.copy(camera.position);
+    updateChunkVisibility(camera);
+
+    if (underwaterOverlay) {
+        if (camera.position.y < -5.05) { 
+            underwaterOverlay.style.display = 'block';
+            scene.fog.color.setHex(0x001e32); 
+            scene.fog.near = 1;
+            scene.fog.far = 30;
+        } else {
+            underwaterOverlay.style.display = 'none';
+            scene.fog.color.setHex(skyColor); 
+            scene.fog.near = 20;
+            scene.fog.far = (CHUNK_SIZE * RENDER_DISTANCE) - 10;
+        }
+    }
+
     const nowFrame = performance.now();
     const frameDtMs = nowFrame - lastRenderTime;
     lastRenderTime = nowFrame;
+    const mapVisible = isLargeMapVisible ? isLargeMapVisible() : false;
+    const mapJustClosed = lastMapVisible && !mapVisible;
 
-    // Smooth the RFPS readout to avoid the high/low bounce from fractional frame pacing against the monitor refresh.
-    const rawRfps = 1000 / Math.max(frameDtMs, 0.0001);
-    const clampedRfps = Math.min(rawRfps, targetFps * 1.5);
-    if (smoothedRfps === 0) smoothedRfps = clampedRfps;
-    smoothedRfps += (clampedRfps - smoothedRfps) * RFPS_SMOOTH;
-    fpsPanel.update(smoothedRfps, targetFps * 2);
-
-    // Dynamic Resolution Logic
-    fpsCheckTimer += frameDtMs;
-    framesSinceLastCheck++;
-    slowRecoverTimer += frameDtMs;
-
-    if (fpsCheckTimer > FPS_CHECK_INTERVAL) {
-        const avgFps = (framesSinceLastCheck / fpsCheckTimer) * 1000;
-        // Keep the dynamic resolution target at or below the measured refresh so we can recover upward
-        // after a drop instead of chasing an unreachable high target.
-        const effectiveTarget = getEffectiveTargetFps();
-        const displayCap = bestDetectedHz || effectiveTarget;
-        const dynResTarget = Math.min(displayCap, effectiveTarget);
-        
-        const canAdjust = (nowFrame - lastDynResChange) > DYNRES_MIN_INTERVAL;
-        if (canAdjust && avgFps < dynResTarget - 10 && currentPixelRatio > MIN_PIXEL_RATIO) {
-            const nextRatio = Math.max(MIN_PIXEL_RATIO, currentPixelRatio - 0.05);
-            if (Math.abs(nextRatio - currentPixelRatio) > 0.001) {
-                currentPixelRatio = nextRatio;
-                renderer.setPixelRatio(currentPixelRatio);
-                lastDynResChange = nowFrame;
-            }
-        }
-        
+    if (mapJustClosed) {
+        currentPixelRatio = MAX_PIXEL_RATIO;
+        renderer.setPixelRatio(currentPixelRatio);
+        lastDynResChange = nowFrame;
+        mapCooldownMs = MAP_RESUME_DELAY_MS;
         fpsCheckTimer = 0;
         framesSinceLastCheck = 0;
     }
 
-    // Gentle recovery probing: if we've been stable for a while and still below max ratio, try nudging up.
-    if (slowRecoverTimer > RECOVER_INTERVAL && currentPixelRatio < MAX_PIXEL_RATIO) {
-        const safeHeadroomFps = smoothedRfps || targetFps;
-        if (safeHeadroomFps > targetFps - 5) {
-            const nextRatio = Math.min(MAX_PIXEL_RATIO, currentPixelRatio + UPSCALE_STEP);
-            if (Math.abs(nextRatio - currentPixelRatio) > 0.001) {
-                currentPixelRatio = nextRatio;
-                renderer.setPixelRatio(currentPixelRatio);
-                slowRecoverTimer = 0;
-                lastDynResChange = performance.now();
+    if (mapVisible) {
+        mapCooldownMs = MAP_RESUME_DELAY_MS;
+        fpsCheckTimer = 0;
+        framesSinceLastCheck = 0;
+    } else if (mapCooldownMs > 0) {
+        mapCooldownMs = Math.max(0, mapCooldownMs - frameDtMs);
+    }
+
+    // Smooth the RFPS readout to avoid the high/low bounce from fractional frame pacing against the monitor refresh.
+    const rawRfps = 1000 / Math.max(frameDtMs, 0.0001);
+    if (smoothedRfps === 0) smoothedRfps = rawRfps;
+    smoothedRfps += (rawRfps - smoothedRfps) * RFPS_SMOOTH;
+    const rfpsGaugeMax = Math.max(displayTarget * 2, rawRfps * 1.2);
+    fpsPanel.update(smoothedRfps, rfpsGaugeMax);
+
+    // Dynamic Resolution Logic (downscale only; no upscaling)
+    if (!mapVisible && mapCooldownMs === 0) {
+        fpsCheckTimer += frameDtMs;
+        framesSinceLastCheck++;
+
+        if (fpsCheckTimer > FPS_CHECK_INTERVAL) {
+            const avgFps = (framesSinceLastCheck / fpsCheckTimer) * 1000;
+            const dynResTarget = displayTarget;
+            
+            const canAdjust = (nowFrame - lastDynResChange) > DYNRES_MIN_INTERVAL;
+            if (canAdjust && avgFps < dynResTarget - 10 && currentPixelRatio > MIN_PIXEL_RATIO) {
+                const nextRatio = Math.max(MIN_PIXEL_RATIO, currentPixelRatio - 0.05);
+                if (Math.abs(nextRatio - currentPixelRatio) > 0.001) {
+                    currentPixelRatio = nextRatio;
+                    renderer.setPixelRatio(currentPixelRatio);
+                    lastDynResChange = nowFrame;
+                }
             }
+            
+            fpsCheckTimer = 0;
+            framesSinceLastCheck = 0;
         }
+    } else {
+        // Avoid using map performance samples to drive resolution changes
+        fpsCheckTimer = 0;
+        framesSinceLastCheck = 0;
     }
 
     if (waterMesh) {
@@ -747,17 +775,19 @@ function animate(now) {
         waterMesh.position.x = Math.floor(camera.position.x / gridSpacing) * gridSpacing;
         waterMesh.position.z = Math.floor(camera.position.z / gridSpacing) * gridSpacing;
         
-        waterMesh.material.uniforms.uTime.value = clock.getElapsedTime();
+        waterMesh.material.uniforms.uTime.value = simClock.getElapsedTime();
     }
 
     renderer.render(scene, camera);
 
     stats.end();
 
-    requestAnimationFrame(animate);
+    lastMapVisible = mapVisible;
+    requestAnimationFrame(renderLoop);
 }
 
-requestAnimationFrame(animate);
+simulationLoop();
+requestAnimationFrame(renderLoop);
 
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
