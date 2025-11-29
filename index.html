@@ -63,7 +63,17 @@
                 <label>Target FPS <span id="val-targetfps">60</span></label>
                 <input type="number" id="targetFpsInput" min="30" max="1000" step="1" value="60">
             </div>
-            
+
+            <div class="setting-row">
+                <label>Curvature <span id="val-curv">0.0025</span></label>
+                <input type="range" id="curvatureSlider" min="-0.01" max="0.01" step="0.0001" value="0.0025">
+            </div>
+
+            <div class="setting-row">
+                <label>Shadows</label>
+                <button id="toggleShadowBtn" style="cursor: pointer; padding: 4px 8px; width: 120px;">On</button>
+            </div>
+
             <div style="margin-top: 10px; text-align: center;">
                 <button id="resetBtn" style="cursor: pointer; padding: 5px 10px;">Reset Defaults</button>
             </div>

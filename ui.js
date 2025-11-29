@@ -1,5 +1,5 @@
 import { physicsParams, playerPos, velocity } from './physics.js';
-import { DEFAULTS, CHUNK_SIZE, GRAPHICS_SETTINGS } from './config.js';
+import { DEFAULTS, CHUNK_SIZE, GRAPHICS_SETTINGS, CURVATURE_STRENGTH } from './config.js';
 import { activeChunks, getTerrainHeight } from './world.js';
 import { initLargeMap, toggleLargeMap, updateLargeMapWithCamera } from './LargeMap.js';
 import { keys } from './input.js';
@@ -35,6 +35,7 @@ export function initUI(controls) {
     const jumpSlider = document.getElementById('jumpSlider');
     const gravitySlider = document.getElementById('gravitySlider');
     const airMaxSlider = document.getElementById('airMaxSlider');
+    const curvatureSlider = document.getElementById('curvatureSlider');
     const targetFpsInput = document.getElementById('targetFpsInput');
     const resetBtn = document.getElementById('resetBtn');
     const settingsMenu = document.getElementById('settings-menu');
@@ -101,12 +102,29 @@ export function initUI(controls) {
         updateDisplay('val-airmax', val.toFixed(1));
     });
 
+    if (curvatureSlider) {
+        const applyCurvature = (v) => {
+            GRAPHICS_SETTINGS.CURVATURE = v;
+            updateDisplay('val-curv', v.toFixed(4));
+        };
+        curvatureSlider.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            applyCurvature(val);
+        });
+        curvatureSlider.value = GRAPHICS_SETTINGS.CURVATURE ?? CURVATURE_STRENGTH;
+        applyCurvature(parseFloat(curvatureSlider.value));
+    }
+
     resetBtn.addEventListener('click', () => {
         physicsParams.MOVE_SPEED = DEFAULTS.MOVE_SPEED;
         physicsParams.JUMP_FORCE = DEFAULTS.JUMP_FORCE;
         physicsParams.GRAVITY = DEFAULTS.GRAVITY;
         controls.pointerSpeed = DEFAULTS.SENSITIVITY;
         physicsParams.MAX_AIR_SPEED = DEFAULTS.MAX_AIR_SPEED;
+        if (curvatureSlider) {
+            curvatureSlider.value = CURVATURE_STRENGTH;
+            curvatureSlider.dispatchEvent(new Event('input'));
+        }
 
         speedSlider.value = physicsParams.MOVE_SPEED;
         jumpSlider.value = physicsParams.JUMP_FORCE;

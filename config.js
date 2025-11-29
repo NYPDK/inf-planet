@@ -17,7 +17,17 @@ export const DEFAULTS = {
 };
 
 export const GRAPHICS_SETTINGS = {
-    TARGET_FPS: 60.0
+    TARGET_FPS: 60.0,
+    CURVATURE: CURVATURE_STRENGTH,
+    SHADOWS: true
+};
+
+export const PARTICLE_SETTINGS = {
+    COUNT: 500,
+    MAX_UPDATES_PER_FRAME: 180,
+    NEIGHBOR_SAMPLES: 8,
+    HEIGHT_CACHE_GRID: 1.5,
+    HEIGHT_CACHE_MAX: 2048
 };
 
 export const PHYSICS_CONSTANTS = {

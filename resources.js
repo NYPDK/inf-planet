@@ -8,36 +8,42 @@ export const geometries = {};
 export let waterMesh;
 
 export function initResources(scene, globalShaderUniforms, maxAnisotropy = 1) {
-    const targetAniso = Math.max(1, Math.min(4, maxAnisotropy || 1));
+    const targetAniso = 1; // PS1-style: no anisotropy
     const shaderUniforms = globalShaderUniforms || {
         uCurvature: { value: 0.0 },
-        uBendCenter: { value: new THREE.Vector3() }
+        uBendCenter: { value: new THREE.Vector3() },
+        uPsxTexel: { value: new THREE.Vector2(2 / 320, 2 / 240) }
     };
 
     const textureLoader = new THREE.TextureLoader();
     const grassTexture = textureLoader.load('textures/tall-grass-texture.png');
     grassTexture.colorSpace = THREE.SRGBColorSpace;
     grassTexture.anisotropy = targetAniso;
+    grassTexture.minFilter = THREE.NearestFilter;
+    grassTexture.magFilter = THREE.NearestFilter;
+    grassTexture.generateMipmaps = false;
     const grassDryTexture = textureLoader.load('textures/tall-grass-dry-texture.png');
     grassDryTexture.colorSpace = THREE.SRGBColorSpace;
     grassDryTexture.anisotropy = targetAniso;
+    grassDryTexture.minFilter = THREE.NearestFilter;
+    grassDryTexture.magFilter = THREE.NearestFilter;
+    grassDryTexture.generateMipmaps = false;
     const GRASS_ALPHA_TEST = 0.5;
 
-    const groundBump = generateNoiseTexture();
-    groundBump.anisotropy = targetAniso;
+    const groundBump = null;
 
     materials.groundMat = new THREE.MeshStandardMaterial({ 
         vertexColors: true, 
         roughness: 1.0, 
         metalness: 0.0,
-        bumpMap: groundBump,
-        bumpScale: BUMP_SCALE 
+        flatShading: true
     });
 
     materials.trunkMat = new THREE.MeshStandardMaterial({ 
         color: 0x3d2817, 
         roughness: 0.9,
-        metalness: 0.0
+        metalness: 0.0,
+        flatShading: true
     });
 
     materials.treeMat = new THREE.MeshStandardMaterial({ 
@@ -79,6 +85,7 @@ export function initResources(scene, globalShaderUniforms, maxAnisotropy = 1) {
     const commonUniforms = `
         uniform float uCurvature;
         uniform vec3 uBendCenter;
+        uniform vec2 uPsxTexel;
     `;
     
     const curvatureLogic = `
@@ -97,6 +104,8 @@ export function initResources(scene, globalShaderUniforms, maxAnisotropy = 1) {
 
         vec4 mvPosition = viewMatrix * bentWorldPosition;
         gl_Position = projectionMatrix * mvPosition;
+        vec2 snap = uPsxTexel * gl_Position.w;
+        gl_Position.xy = floor(gl_Position.xy / snap) * snap;
 
         #if defined( DEPTH_PACKING ) && DEPTH_PACKING == 3201
             vHighPrecisionZW = gl_Position.zw;
@@ -107,6 +116,7 @@ export function initResources(scene, globalShaderUniforms, maxAnisotropy = 1) {
         material.onBeforeCompile = (shader) => {
             shader.uniforms.uCurvature = shaderUniforms.uCurvature;
             shader.uniforms.uBendCenter = shaderUniforms.uBendCenter;
+            shader.uniforms.uPsxTexel = shaderUniforms.uPsxTexel;
 
             shader.vertexShader = shader.vertexShader.replace(
                 '#include <common>',
@@ -190,6 +200,7 @@ export function initResources(scene, globalShaderUniforms, maxAnisotropy = 1) {
         varying float vHeight;
         varying vec3 vWorldPosition;
         varying vec3 vNormal;
+        uniform vec2 uPsxTexel;
 
         void main() {
             vec3 pos = position;
@@ -220,6 +231,8 @@ export function initResources(scene, globalShaderUniforms, maxAnisotropy = 1) {
 
             vec4 mvPosition = viewMatrix * worldPos;
             gl_Position = projectionMatrix * mvPosition;
+            vec2 snap = uPsxTexel * gl_Position.w;
+            gl_Position.xy = floor(gl_Position.xy / snap) * snap;
             
             #include <fog_vertex>
             vFogDepth = length(mvPosition.xyz); 

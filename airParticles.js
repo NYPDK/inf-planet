@@ -1,15 +1,15 @@
 import * as THREE from 'three';
-import { CHUNK_SIZE, RENDER_DISTANCE } from './config.js';
+import { CHUNK_SIZE, RENDER_DISTANCE, PARTICLE_SETTINGS } from './config.js';
 import { getTerrainHeight, activeChunks } from './world.js';
 
-const PARTICLE_COUNT = 500;
+const PARTICLE_COUNT = PARTICLE_SETTINGS?.COUNT ?? 500;
 const PARTICLE_RADIUS = CHUNK_SIZE * (RENDER_DISTANCE - 1.0);
 const PARTICLE_REPEL_RADIUS = 5.0;
 const PARTICLE_REPEL_STRENGTH = 32.0;
 const PARTICLE_WIND_MAX = 0.9;
 const PARTICLE_WIND_CHANGE_INTERVAL = 6.0;
 const PARTICLE_SWIRL_BASE = 1.2;
-const PARTICLE_MAX_UPDATES_PER_FRAME = 2000;
+const PARTICLE_MAX_UPDATES_PER_FRAME = Math.max(1, PARTICLE_SETTINGS?.MAX_UPDATES_PER_FRAME ?? PARTICLE_COUNT);
 const PARTICLE_MAX_HEIGHT_ABOVE_GROUND = 20.0;
 const PARTICLE_MIN_CLEARANCE = 0.5;
 const PARTICLE_GROUND_SOFT_CLEAR = 1.0;
@@ -25,11 +25,14 @@ const PARTICLE_CLUSTER_DRIFT_CHANGE_INTERVAL = 4.0;
 const PARTICLE_FRONT_CONE_COS = 0.766;
 const PARTICLE_FRONT_AVOID_DISTANCE = 12.0;
 const BOID_NEIGHBOR_RADIUS = 3.5;
-const BOID_SAMPLE_COUNT = 12;
+const BOID_SAMPLE_COUNT = Math.max(1, PARTICLE_SETTINGS?.NEIGHBOR_SAMPLES ?? 12);
 const BOID_ALIGN_WEIGHT = 3.0;
 const BOID_COHESION_WEIGHT = 2.0;
 const BOID_SEPARATION_WEIGHT = 6.0;
 const BOID_MAX_SPEED = 12.0;
+const TERRAIN_CACHE_GRID = PARTICLE_SETTINGS?.HEIGHT_CACHE_GRID ?? 1.25;
+const TERRAIN_CACHE_MAX = PARTICLE_SETTINGS?.HEIGHT_CACHE_MAX ?? 2048;
+const PARTICLE_MAX_STEP = 0.1;
 
 export function createAirParticles({ scene, camera, globalShaderUniforms, targetAnisotropy, getWaterLevel }) {
     const particleGeometry = new THREE.BufferGeometry();
@@ -60,9 +63,24 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
     const _camDir = new THREE.Vector3();
     const _groundNormal = new THREE.Vector3();
     const _swirlVec = new THREE.Vector3();
+    const _heightCache = new Map();
+
+    function sampleTerrainHeight(x, z) {
+        const qx = Math.round(x / TERRAIN_CACHE_GRID);
+        const qz = Math.round(z / TERRAIN_CACHE_GRID);
+        const key = `${qx}|${qz}`;
+        const cached = _heightCache.get(key);
+        if (cached !== undefined) return cached;
+        if (_heightCache.size >= TERRAIN_CACHE_MAX) {
+            _heightCache.clear();
+        }
+        const h = getTerrainHeight(qx * TERRAIN_CACHE_GRID, qz * TERRAIN_CACHE_GRID);
+        _heightCache.set(key, h);
+        return h;
+    }
 
     function clampParticleHeight(pos) {
-        const groundY = getTerrainHeight(pos.x, pos.z);
+        const groundY = sampleTerrainHeight(pos.x, pos.z);
         const minY = groundY + PARTICLE_MIN_CLEARANCE;
         const maxY = groundY + PARTICLE_MAX_HEIGHT_ABOVE_GROUND;
         const waterMin = Math.max(minY, PARTICLE_WATER_MIN_Y);
@@ -72,10 +90,10 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
 
     function getGroundNormal(x, z) {
         const eps = 0.6;
-        const hL = getTerrainHeight(x - eps, z);
-        const hR = getTerrainHeight(x + eps, z);
-        const hD = getTerrainHeight(x, z - eps);
-        const hU = getTerrainHeight(x, z + eps);
+        const hL = sampleTerrainHeight(x - eps, z);
+        const hR = sampleTerrainHeight(x + eps, z);
+        const hD = sampleTerrainHeight(x, z - eps);
+        const hU = sampleTerrainHeight(x, z + eps);
         _groundNormal.set(-(hR - hL), 2 * eps, -(hU - hD)).normalize();
         return _groundNormal;
     }
@@ -95,7 +113,7 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
     }
 
     function obstacleAvoidance(pos, vel, dt) {
-        const groundY = getTerrainHeight(pos.x, pos.z);
+        const groundY = sampleTerrainHeight(pos.x, pos.z);
         const groundNormal = getGroundNormal(pos.x, pos.z);
         const clearance = pos.y - groundY;
         const desiredY = groundY + PARTICLE_MIN_CLEARANCE + 0.6;
@@ -119,9 +137,8 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
         for (let dx = -1; dx <= 1; dx++) {
             for (let dz = -1; dz <= 1; dz++) {
                 const key = `${cx + dx},${cz + dz}`;
-                const chunk = activeChunks.get(key);
-                if (!chunk || !chunk.userData || !chunk.userData.trees) continue;
-                const trees = chunk.userData.trees;
+                const trees = activeChunks.get(key)?.userData?.trees;
+                if (!trees || trees.length === 0) continue;
                 for (let t = 0; t < trees.length; t++) {
                     const tree = trees[t];
                     const dxp = pos.x - tree.x;
@@ -163,7 +180,6 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
     }
 
     function isInFrontCone(pos) {
-        camera.getWorldDirection(_camDir);
         _tmpOffset.subVectors(pos, camera.position);
         const dist = _tmpOffset.length();
         if (dist < 0.0001) return true;
@@ -190,6 +206,7 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
     }
 
     function initAirParticles() {
+        camera.getWorldDirection(_camDir);
         particleClusterOffsets.length = 0;
         particleClusterDrift.length = 0;
         particleClusterDriftTimer.length = 0;
@@ -226,9 +243,9 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
             }
         });
         particleTexture.colorSpace = THREE.SRGBColorSpace;
-        particleTexture.anisotropy = targetAnisotropy;
-        particleTexture.minFilter = THREE.LinearFilter;
-        particleTexture.magFilter = THREE.LinearFilter;
+        particleTexture.anisotropy = 1;
+        particleTexture.minFilter = THREE.NearestFilter;
+        particleTexture.magFilter = THREE.NearestFilter;
         particleTexture.generateMipmaps = false;
         particleTexture.wrapS = THREE.ClampToEdgeWrapping;
         particleTexture.wrapT = THREE.ClampToEdgeWrapping;
@@ -254,12 +271,14 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
         particleMaterial.onBeforeCompile = (shader) => {
             Object.assign(shader.uniforms, particleMaterialUniforms);
             shader.uniforms.uAspect = { value: particleAspect };
+            shader.uniforms.uPsxTexel = globalShaderUniforms.uPsxTexel;
 
             shader.vertexShader = shader.vertexShader.replace(
                 '#include <common>',
                 `
                 uniform float uCurvature;
                 uniform vec3 uBendCenter;
+                uniform vec2 uPsxTexel;
                 varying vec3 vWorldPos;
                 #include <common>
                 `
@@ -277,6 +296,8 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
 
                 vec4 mvPosition = viewMatrix * bentWorldPosition;
                 gl_Position = projectionMatrix * mvPosition;
+                vec2 snap = uPsxTexel * gl_Position.w;
+                gl_Position.xy = floor(gl_Position.xy / snap) * snap;
                 `
             );
 
@@ -314,8 +335,7 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
             );
         };
         particlePoints = new THREE.Points(particleGeometry, particleMaterial);
-        particleGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), PARTICLE_RADIUS + 5);
-        particlePoints.frustumCulled = true;
+        particlePoints.frustumCulled = false;
         particlePoints.renderOrder = 2;
         scene.add(particlePoints);
     }
@@ -325,9 +345,7 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
         if (particleMaterialUniforms && typeof getWaterLevel === 'function') {
             particleMaterialUniforms.uWaterLevel.value = getWaterLevel();
         }
-        if (particleGeometry.boundingSphere) {
-            particleGeometry.boundingSphere.center.copy(camera.position);
-        }
+        camera.getWorldDirection(_camDir);
         updateWind(dt);
         updateClusterOffsets(dt);
         const positions = particleGeometry.attributes.position.array;
@@ -337,6 +355,8 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
         const updatesThisFrame = Math.min(PARTICLE_MAX_UPDATES_PER_FRAME, PARTICLE_COUNT);
         const stride = Math.max(1, Math.ceil(PARTICLE_COUNT / updatesThisFrame));
         particleUpdateOffset = (particleUpdateOffset + 1) % stride;
+        const stepDt = Math.min(dt * stride, PARTICLE_MAX_STEP);
+        const neighborSamples = Math.min(BOID_SAMPLE_COUNT, PARTICLE_COUNT - 1);
 
         for (let i = particleUpdateOffset; i < PARTICLE_COUNT; i += stride) {
             const base = i * 3;
@@ -351,7 +371,7 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
             _boidSeparate.set(0, 0, 0);
             let neighborCount = 0;
 
-            for (let n = 0; n < BOID_SAMPLE_COUNT; n++) {
+            for (let n = 0; n < neighborSamples; n++) {
                 const idx = Math.floor(Math.random() * PARTICLE_COUNT);
                 if (idx === i) continue;
                 const nBase = idx * 3;
@@ -383,9 +403,9 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
                 _boidAlign.sub(_tmpVel).multiplyScalar(BOID_ALIGN_WEIGHT);
                 _boidSeparate.multiplyScalar(BOID_SEPARATION_WEIGHT);
 
-                _tmpVel.addScaledVector(_boidCenter, dt);
-                _tmpVel.addScaledVector(_boidAlign, dt);
-                _tmpVel.addScaledVector(_boidSeparate, dt);
+                _tmpVel.addScaledVector(_boidCenter, stepDt);
+                _tmpVel.addScaledVector(_boidAlign, stepDt);
+                _tmpVel.addScaledVector(_boidSeparate, stepDt);
             }
 
             _swirlVec.set(_tmpVec.x - clusterCenter.x, 0, _tmpVec.z - clusterCenter.z);
@@ -393,7 +413,7 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
             if (swirlLen2 > 0.0001) {
                 const swirlLen = Math.sqrt(swirlLen2);
                 _swirlVec.set(-_swirlVec.z / swirlLen, 0, _swirlVec.x / swirlLen);
-                _tmpVel.addScaledVector(_swirlVec, swirlStrength * dt);
+                _tmpVel.addScaledVector(_swirlVec, swirlStrength * stepDt);
             }
 
             _tmpOffset.subVectors(_tmpVec, camera.position);
@@ -401,23 +421,23 @@ export function createAirParticles({ scene, camera, globalShaderUniforms, target
             if (dist < PARTICLE_REPEL_RADIUS && dist > 0.0001) {
                 _tmpOffset.normalize();
                 const strength = (PARTICLE_REPEL_RADIUS - dist) / PARTICLE_REPEL_RADIUS;
-                _tmpVel.addScaledVector(_tmpOffset, strength * PARTICLE_REPEL_STRENGTH * dt);
+                _tmpVel.addScaledVector(_tmpOffset, strength * PARTICLE_REPEL_STRENGTH * stepDt);
             } else {
-                _tmpVel.multiplyScalar(1 - Math.min(1, dt * 0.05));
-                _tmpVel.x += (Math.random() - 0.5) * 8.0 * dt;
-                _tmpVel.y += (Math.random() - 0.5) * 3.0 * dt;
-                _tmpVel.z += (Math.random() - 0.5) * 8.0 * dt;
+                _tmpVel.multiplyScalar(1 - Math.min(1, stepDt * 0.05));
+                _tmpVel.x += (Math.random() - 0.5) * 8.0 * stepDt;
+                _tmpVel.y += (Math.random() - 0.5) * 3.0 * stepDt;
+                _tmpVel.z += (Math.random() - 0.5) * 8.0 * stepDt;
             }
 
-            _tmpVel.addScaledVector(_globalWind, dt * 0.65);
+            _tmpVel.addScaledVector(_globalWind, stepDt * 0.65);
 
             const speed = _tmpVel.length();
             if (speed > BOID_MAX_SPEED) {
                 _tmpVel.multiplyScalar(BOID_MAX_SPEED / speed);
             }
 
-            _tmpVec.addScaledVector(_tmpVel, dt);
-            obstacleAvoidance(_tmpVec, _tmpVel, dt);
+            _tmpVec.addScaledVector(_tmpVel, stepDt);
+            obstacleAvoidance(_tmpVec, _tmpVel, stepDt);
             _tmpVel.y *= 0.98;
 
             _tmpOffset.subVectors(_tmpVec, camera.position);
